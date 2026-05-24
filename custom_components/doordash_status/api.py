@@ -697,31 +697,45 @@ def _extract_store_name(candidate: dict[str, Any]) -> str | None:
         "merchantName",
         "business_name",
         "businessName",
-        "name",
+        "restaurant_name",
+        "restaurantName",
     ):
         value = candidate.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
 
-    for key in ("store", "merchant", "business", "restaurant", "store_info", "storeInfo"):
+    for key in (
+        "store",
+        "merchant",
+        "business",
+        "restaurant",
+        "store_info",
+        "storeInfo",
+        "merchant_info",
+        "merchantInfo",
+        "restaurant_info",
+        "restaurantInfo",
+    ):
         nested = candidate.get(key)
         if isinstance(nested, dict):
-            value = _first_value(nested, "name", "business_name", "display_name")
+            value = _first_value(
+                nested,
+                "store_name",
+                "storeName",
+                "merchant_name",
+                "merchantName",
+                "business_name",
+                "businessName",
+                "restaurant_name",
+                "restaurantName",
+                "display_name",
+                "displayName",
+                "name",
+            )
             if isinstance(value, str) and value.strip():
                 return value.strip()
 
-    nested_value = _find_nested_value(
-        candidate,
-        "store_name",
-        "storeName",
-        "merchant_name",
-        "merchantName",
-        "business_name",
-        "businessName",
-        "display_name",
-        "displayName",
-        "name",
-    )
+    nested_value = _find_nested_store_name(candidate)
     if isinstance(nested_value, str) and nested_value.strip():
         return nested_value.strip()
     return None
@@ -996,6 +1010,64 @@ def _find_nested_items(candidate: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+def _find_nested_store_name(candidate: dict[str, Any]) -> str | None:
+    """Search nested merchant/store containers for a likely store name."""
+    container_keys = {
+        "store",
+        "merchant",
+        "business",
+        "restaurant",
+        "store_info",
+        "storeinfo",
+        "merchant_info",
+        "merchantinfo",
+        "restaurant_info",
+        "restaurantinfo",
+    }
+    name_keys = (
+        "store_name",
+        "storeName",
+        "merchant_name",
+        "merchantName",
+        "business_name",
+        "businessName",
+        "restaurant_name",
+        "restaurantName",
+        "display_name",
+        "displayName",
+        "name",
+    )
+
+    queue: list[Any] = [candidate]
+    seen: set[int] = set()
+
+    while queue:
+        current = queue.pop(0)
+        if not isinstance(current, dict):
+            continue
+
+        current_id = id(current)
+        if current_id in seen:
+            continue
+        seen.add(current_id)
+
+        for key, value in current.items():
+            lowered = key.lower()
+            if lowered in container_keys and isinstance(value, dict):
+                candidate_name = _first_value(value, *name_keys)
+                if isinstance(candidate_name, str) and candidate_name.strip():
+                    return candidate_name.strip()
+                queue.append(value)
+                continue
+
+            if isinstance(value, dict):
+                queue.append(value)
+            elif isinstance(value, list):
+                queue.extend(item for item in value if isinstance(item, dict))
+
+    return None
+
+
 def _normalize_item_list(value: list[Any]) -> list[dict[str, Any]]:
     """Normalize an item-like list into name/quantity pairs."""
     items: list[dict[str, Any]] = []
@@ -1083,9 +1155,10 @@ def _find_best_money_value(candidate: dict[str, Any]) -> tuple[str | None, float
 def _score_money_candidate(key: str, value: Any) -> int:
     """Score how likely a key/value pair is to represent the full order total."""
     lowered = key.lower()
+    label = _extract_money_label(value)
 
     if any(
-        token in lowered
+        token in f"{lowered} {label}".strip()
         for token in (
             "tip",
             "tax",
@@ -1105,6 +1178,11 @@ def _score_money_candidate(key: str, value: Any) -> int:
     if normalized == (None, None):
         return -1
 
+    if any(token in label for token in ("grand total", "order total", "amount charged", "total")):
+        return 9
+    if any(token in label for token in ("subtotal",)):
+        return 3
+
     if any(token in lowered for token in ("grand_total", "grandtotal", "order_total", "ordertotal")):
         return 8
     if any(token in lowered for token in ("amount_charged", "amountcharged", "charged_total")):
@@ -1121,6 +1199,25 @@ def _score_money_candidate(key: str, value: Any) -> int:
         return 1
 
     return 0
+
+
+def _extract_money_label(value: Any) -> str:
+    """Extract a lowercase descriptive label from a money-like structure."""
+    if not isinstance(value, dict):
+        return ""
+
+    label = _first_value(
+        value,
+        "label",
+        "title",
+        "name",
+        "description",
+        "display_name",
+        "displayName",
+    )
+    if not isinstance(label, str):
+        return ""
+    return label.strip().lower()
 
 
 def _normalize_money(value: Any) -> tuple[str | None, float | None]:
