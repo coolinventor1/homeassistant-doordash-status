@@ -58,8 +58,8 @@ This is the best setup when you want Home Assistant to automatically watch the l
 1. Log into DoorDash in your browser.
 2. Open browser developer tools.
 3. Open the Network tab and reload a DoorDash page such as `https://www.doordash.com/orders/`.
-4. Click a request going to the DoorDash domain.
-5. Copy the request `Cookie` header value.
+4. Click the page request going to `https://www.doordash.com/orders/` or another logged-in `doordash.com` page request.
+5. Copy the full request `Cookie` header value.
 6. In Home Assistant, choose the `Browser session cookie` setup method and paste that value.
 
 As long as the DoorDash session stays valid, Home Assistant should continue tracking new and active orders without needing a new tracking URL each time.

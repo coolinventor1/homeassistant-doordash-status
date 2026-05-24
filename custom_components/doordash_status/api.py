@@ -53,7 +53,15 @@ class DoorDashApiClient:
         self._tracking_url = tracking_url
         self._headers = {
             "Accept": "text/html,application/xhtml+xml,application/json",
-            "User-Agent": "Mozilla/5.0 (Home Assistant DoorDash Status)",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "Upgrade-Insecure-Requests": "1",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/136.0.0.0 Safari/537.36"
+            ),
         }
         if cookie_header:
             self._headers["Cookie"] = cookie_header
@@ -74,9 +82,7 @@ class DoorDashApiClient:
                 "orders_found": len(orders),
             }
 
-        html, final_url = await self._async_get_text(f"{self._base_url}/orders/")
-        if _looks_like_login_page(str(final_url), html):
-            raise DoorDashAuthError("DoorDash redirected the session to sign in.")
+        html, final_url = await self._async_get_orders_page()
 
         orders = _extract_orders_from_html(html, str(final_url))
         return {
@@ -92,10 +98,39 @@ class DoorDashApiClient:
             html, final_url = await self._async_get_text(self._tracking_url)
             return _extract_orders_from_html(html, str(final_url))
 
-        html, final_url = await self._async_get_text(f"{self._base_url}/orders/")
-        if _looks_like_login_page(str(final_url), html):
-            raise DoorDashAuthError("DoorDash redirected the session to sign in.")
+        html, final_url = await self._async_get_orders_page()
         return _extract_orders_from_html(html, str(final_url))
+
+    async def _async_get_orders_page(self) -> tuple[str, aiohttp.client_reqrep.URL]:
+        """Fetch a logged-in DoorDash orders page using a few likely routes."""
+        candidates = (
+            f"{self._base_url}/orders/",
+            f"{self._base_url}/orders",
+            f"{self._base_url}/consumer/orders/",
+            f"{self._base_url}/consumer/orders",
+        )
+        last_auth_error: DoorDashAuthError | None = None
+
+        for candidate in candidates:
+            try:
+                html, final_url = await self._async_get_text(candidate)
+            except DoorDashAuthError as err:
+                last_auth_error = err
+                continue
+
+            if _looks_like_login_page(str(final_url), html):
+                _LOGGER.debug(
+                    "DoorDash candidate %s redirected to login-like page at %s",
+                    candidate,
+                    final_url,
+                )
+                continue
+
+            return html, final_url
+
+        if last_auth_error is not None:
+            raise last_auth_error
+        raise DoorDashAuthError("DoorDash redirected the session to sign in.")
 
     async def _async_get_text(
         self,
