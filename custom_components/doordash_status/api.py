@@ -22,6 +22,10 @@ _JSON_PARSE_RE = re.compile(
     r"JSON\.parse\((?P<quote>['\"])(?P<payload>.*?)(?P=quote)\)",
     re.DOTALL,
 )
+_NEXT_PUSH_RE = re.compile(
+    r"self\.__next_f\.push\((?P<payload>\[.*\])\)\s*;?\s*$",
+    re.DOTALL,
+)
 
 
 class DoorDashApiError(Exception):
@@ -225,13 +229,19 @@ def _extract_orders_from_html(html: str, page_url: str) -> list[dict[str, Any]]:
         key=_order_sort_key,
         reverse=True,
     )
-    _LOGGER.debug("Extracted %s DoorDash orders from %s", len(extracted), page_url)
+    _LOGGER.debug(
+        "Extracted %s DoorDash orders from %s using %s script tags",
+        len(extracted),
+        page_url,
+        len(collector.scripts),
+    )
     return extracted
 
 
 def _extract_json_payloads(scripts: Iterable[dict[str, Any]]) -> list[Any]:
     """Parse JSON documents embedded in script tags."""
     payloads: list[Any] = []
+    next_chunks: dict[str, list[str]] = {}
     for script in scripts:
         attrs = script["attrs"]
         content = script["content"].strip()
@@ -251,7 +261,120 @@ def _extract_json_payloads(scripts: Iterable[dict[str, Any]]) -> list[Any]:
             parsed = _try_json_load(parsed_string)
             if parsed is not None:
                 payloads.append(parsed)
+
+        next_chunk = _parse_next_push_chunk(content)
+        if next_chunk is not None:
+            chunk_id, chunk_text = next_chunk
+            next_chunks.setdefault(chunk_id, []).append(chunk_text)
+
+    for chunk_id, parts in next_chunks.items():
+        joined = "".join(parts)
+        extracted = _extract_structured_values_from_text(joined)
+        if extracted:
+            payloads.extend(extracted)
+            continue
+        _LOGGER.debug("DoorDash Next.js chunk %s did not yield structured values", chunk_id)
     return payloads
+
+
+def _parse_next_push_chunk(content: str) -> tuple[str, str] | None:
+    """Parse a Next.js App Router hydration chunk from a script body."""
+    match = _NEXT_PUSH_RE.match(content)
+    if match is None:
+        return None
+
+    try:
+        payload = json.loads(match.group("payload"))
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(payload, list) or len(payload) < 2:
+        return None
+
+    chunk_id = str(payload[0])
+    chunk_text = payload[1]
+    if not isinstance(chunk_text, str):
+        return None
+
+    return chunk_id, chunk_text
+
+
+def _extract_structured_values_from_text(text: str) -> list[Any]:
+    """Extract JSON-like objects from a raw hydration chunk string."""
+    values: list[Any] = []
+
+    parsed = _try_json_load(text)
+    if parsed is not None:
+        values.append(parsed)
+
+    for segment in _iter_json_substrings(text):
+        parsed_segment = _try_json_load(segment)
+        if parsed_segment is not None:
+            values.append(parsed_segment)
+
+    colon_index = text.find(":{")
+    if colon_index != -1:
+        parsed_suffix = _try_json_load(text[colon_index + 1 :])
+        if parsed_suffix is not None:
+            values.append(parsed_suffix)
+
+    return values
+
+
+def _iter_json_substrings(text: str) -> Iterable[str]:
+    """Yield candidate object/array substrings from mixed hydration text."""
+    opener_to_closer = {"{": "}", "[": "]"}
+    for index, char in enumerate(text):
+        if char not in opener_to_closer:
+            continue
+
+        closer = opener_to_closer[char]
+        depth = 0
+        in_string = False
+        escaped = False
+
+        for end_index in range(index, len(text)):
+            current = text[end_index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif current == "\\":
+                    escaped = True
+                elif current == "\"":
+                    in_string = False
+                continue
+
+            if current == "\"":
+                in_string = True
+                continue
+
+            if current == char:
+                depth += 1
+            elif current == closer:
+                depth -= 1
+                if depth == 0:
+                    candidate = text[index : end_index + 1]
+                    if _looks_structured_and_relevant(candidate):
+                        yield candidate
+                    break
+
+
+def _looks_structured_and_relevant(candidate: str) -> bool:
+    """Return whether a JSON substring is likely to contain order data."""
+    lowered = candidate.lower()
+    return any(
+        token in lowered
+        for token in (
+            "order",
+            "merchant",
+            "store",
+            "tracking",
+            "delivery",
+            "dasher",
+            "subtotal",
+            "total",
+        )
+    )
 
 
 def _try_json_load(value: str) -> Any | None:
@@ -293,8 +416,15 @@ def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict
     order_id = _first_value(
         candidate,
         "order_id",
+        "orderId",
+        "order_uuid",
+        "orderUuid",
         "delivery_uuid",
+        "deliveryUuid",
+        "delivery_id",
+        "deliveryId",
         "external_delivery_id",
+        "externalDeliveryId",
         "id",
         "uuid",
     )
@@ -316,7 +446,17 @@ def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict
         )
     )
     created_at = _parse_any_datetime(
-        _first_value(candidate, "created_at", "createdAt", "placed_at", "placedAt")
+        _first_value(
+            candidate,
+            "created_at",
+            "createdAt",
+            "submitted_at",
+            "submittedAt",
+            "placed_at",
+            "placedAt",
+            "order_time",
+            "orderTime",
+        )
     )
     total_display, total_amount = _extract_total(candidate)
     fulfillment_type = _stringify(
@@ -332,11 +472,14 @@ def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict
             tracking_url,
             store_name,
             eta_at or eta_text,
+            created_at,
+            updated_at,
             total_display or total_amount,
             items,
+            order_id,
         )
     )
-    if signal_count < 2:
+    if signal_count < 2 or (store_name is None and tracking_url is None and order_id is None):
         return None
 
     synthetic_id = order_id or tracking_url or help_url or f"{store_name}:{status}:{eta_text}"
@@ -363,7 +506,17 @@ def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict
 
 def _extract_status(candidate: dict[str, Any]) -> Any:
     """Extract a status-like field."""
-    for key in ("order_status", "status", "delivery_status", "status_text", "phase"):
+    for key in (
+        "order_status",
+        "orderStatus",
+        "status",
+        "delivery_status",
+        "deliveryStatus",
+        "status_text",
+        "statusText",
+        "phase",
+        "state",
+    ):
         if key not in candidate:
             continue
         value = candidate[key]
@@ -375,12 +528,20 @@ def _extract_status(candidate: dict[str, Any]) -> Any:
 
 def _extract_store_name(candidate: dict[str, Any]) -> str | None:
     """Extract a merchant or store name from a candidate payload."""
-    for key in ("store_name", "merchant_name", "business_name", "name"):
+    for key in (
+        "store_name",
+        "storeName",
+        "merchant_name",
+        "merchantName",
+        "business_name",
+        "businessName",
+        "name",
+    ):
         value = candidate.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
 
-    for key in ("store", "merchant", "business", "restaurant"):
+    for key in ("store", "merchant", "business", "restaurant", "store_info", "storeInfo"):
         nested = candidate.get(key)
         if isinstance(nested, dict):
             value = _first_value(nested, "name", "business_name", "display_name")
@@ -393,11 +554,18 @@ def _extract_eta(candidate: dict[str, Any]) -> tuple[datetime | None, str | None
     """Extract ETA information as both datetime and display text."""
     for key in (
         "eta",
+        "eta_text",
+        "etaText",
         "estimated_arrival",
+        "estimatedArrival",
         "estimated_delivery_time",
+        "estimatedDeliveryTime",
         "delivery_eta",
+        "deliveryEta",
         "arrival_time",
+        "arrivalTime",
         "dropoff_time",
+        "dropoffTime",
     ):
         if key not in candidate:
             continue
@@ -426,7 +594,19 @@ def _extract_eta(candidate: dict[str, Any]) -> tuple[datetime | None, str | None
 
 def _extract_total(candidate: dict[str, Any]) -> tuple[str | None, float | None]:
     """Extract total price information from a candidate payload."""
-    for key in ("total", "total_price", "order_total", "grand_total"):
+    for key in (
+        "total",
+        "total_price",
+        "totalPrice",
+        "order_total",
+        "orderTotal",
+        "grand_total",
+        "grandTotal",
+        "subtotal",
+        "subTotal",
+        "display_total",
+        "displayTotal",
+    ):
         if key not in candidate:
             continue
         return _normalize_money(candidate[key])
@@ -435,7 +615,14 @@ def _extract_total(candidate: dict[str, Any]) -> tuple[str | None, float | None]
 
 def _extract_dasher_name(candidate: dict[str, Any]) -> str | None:
     """Extract a Dasher name when it is present."""
-    for key in ("dasher_name", "courier_name", "driver_name"):
+    for key in (
+        "dasher_name",
+        "dasherName",
+        "courier_name",
+        "courierName",
+        "driver_name",
+        "driverName",
+    ):
         value = candidate.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
@@ -452,7 +639,15 @@ def _extract_dasher_name(candidate: dict[str, Any]) -> str | None:
 
 def _extract_items(candidate: dict[str, Any]) -> list[dict[str, Any]]:
     """Extract a normalized item list from a candidate payload."""
-    for key in ("items", "order_items", "cart_items", "line_items"):
+    for key in (
+        "items",
+        "order_items",
+        "orderItems",
+        "cart_items",
+        "cartItems",
+        "line_items",
+        "lineItems",
+    ):
         value = candidate.get(key)
         if not isinstance(value, list):
             continue
