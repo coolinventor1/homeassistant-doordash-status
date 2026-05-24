@@ -45,6 +45,7 @@ def _serialize_order(order: dict[str, Any] | None) -> dict[str, Any] | None:
         "help_url": order.get("help_url"),
         "dasher_name": order.get("dasher_name"),
         "items": order.get("items"),
+        "confidence": order.get("confidence"),
     }
 
 

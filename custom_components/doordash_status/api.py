@@ -17,6 +17,58 @@ from homeassistant.util import dt as dt_util
 from .const import DEFAULT_REQUEST_TIMEOUT
 
 _LOGGER = logging.getLogger(__name__)
+_US_STATE_CODES = {
+    "AL",
+    "AK",
+    "AZ",
+    "AR",
+    "CA",
+    "CO",
+    "CT",
+    "DE",
+    "FL",
+    "GA",
+    "HI",
+    "IA",
+    "ID",
+    "IL",
+    "IN",
+    "KS",
+    "KY",
+    "LA",
+    "MA",
+    "MD",
+    "ME",
+    "MI",
+    "MN",
+    "MO",
+    "MS",
+    "MT",
+    "NC",
+    "ND",
+    "NE",
+    "NH",
+    "NJ",
+    "NM",
+    "NV",
+    "NY",
+    "OH",
+    "OK",
+    "OR",
+    "PA",
+    "RI",
+    "SC",
+    "SD",
+    "TN",
+    "TX",
+    "UT",
+    "VA",
+    "VT",
+    "WA",
+    "WI",
+    "WV",
+    "WY",
+}
 
 _JSON_PARSE_RE = re.compile(
     r"JSON\.parse\((?P<quote>['\"])(?P<payload>.*?)(?P=quote)\)",
@@ -434,6 +486,7 @@ def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict
     )
     help_url = _normalize_url(_first_value(candidate, "help_url", "helpUrl"), page_url)
     status = _stringify(_extract_status(candidate))
+    status = _normalize_status(status)
     store_name = _extract_store_name(candidate)
     eta_at, eta_text = _extract_eta(candidate)
     updated_at = _parse_any_datetime(
@@ -482,6 +535,20 @@ def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict
     if signal_count < 2 or (store_name is None and tracking_url is None and order_id is None):
         return None
 
+    confidence = _score_order_candidate(
+        order_id=order_id,
+        tracking_url=tracking_url,
+        store_name=store_name,
+        status=status,
+        created_at=created_at,
+        updated_at=updated_at,
+        total_display=total_display,
+        total_amount=total_amount,
+        items=items,
+    )
+    if confidence < 3:
+        return None
+
     synthetic_id = order_id or tracking_url or help_url or f"{store_name}:{status}:{eta_text}"
     if synthetic_id is None:
         return None
@@ -501,6 +568,7 @@ def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict
         "help_url": help_url,
         "dasher_name": dasher_name,
         "items": items,
+        "confidence": confidence,
     }
 
 
@@ -524,6 +592,60 @@ def _extract_status(candidate: dict[str, Any]) -> Any:
             return _first_value(value, "label", "text", "display_string", "value")
         return value
     return None
+
+
+def _normalize_status(status: str | None) -> str | None:
+    """Drop values that look like location codes rather than order statuses."""
+    if status is None:
+        return None
+
+    normalized = status.strip()
+    if not normalized:
+        return None
+
+    if normalized.upper() in _US_STATE_CODES:
+        return None
+
+    if len(normalized) <= 2 and normalized.isalpha():
+        return None
+
+    if normalized.isdigit():
+        return None
+
+    return normalized
+
+
+def _score_order_candidate(
+    *,
+    order_id: Any,
+    tracking_url: str | None,
+    store_name: str | None,
+    status: str | None,
+    created_at: datetime | None,
+    updated_at: datetime | None,
+    total_display: str | None,
+    total_amount: float | None,
+    items: list[dict[str, Any]],
+) -> int:
+    """Return a rough confidence score for whether a payload is a real order."""
+    score = 0
+
+    if store_name:
+        score += 3
+    if tracking_url:
+        score += 2
+    if order_id:
+        score += 1
+    if created_at or updated_at:
+        score += 1
+    if total_display or total_amount is not None:
+        score += 1
+    if items:
+        score += 1
+    if status:
+        score += 1
+
+    return score
 
 
 def _extract_store_name(candidate: dict[str, Any]) -> str | None:
@@ -739,7 +861,7 @@ def _normalize_url(value: Any, page_url: str) -> str | None:
     return urljoin(page_url, value.strip())
 
 
-def _order_sort_key(order: dict[str, Any]) -> tuple[datetime, str]:
+def _order_sort_key(order: dict[str, Any]) -> tuple[int, datetime, str]:
     """Return a stable sort key for order recency."""
     timestamp = (
         order.get("updated_at")
@@ -747,7 +869,7 @@ def _order_sort_key(order: dict[str, Any]) -> tuple[datetime, str]:
         or order.get("created_at")
         or dt_util.utcnow()
     )
-    return timestamp, order["id"]
+    return order.get("confidence", 0), timestamp, order["id"]
 
 
 def _first_value(mapping: dict[str, Any], *keys: str) -> Any:

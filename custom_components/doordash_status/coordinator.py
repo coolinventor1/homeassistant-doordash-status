@@ -76,7 +76,40 @@ def _is_active_status(status: str | None) -> bool:
         return False
 
     lowered = status.lower()
-    return not any(
+    if any(
         keyword in lowered
-        for keyword in ("delivered", "complete", "completed", "cancelled", "canceled", "failed")
+        for keyword in (
+            "delivered",
+            "complete",
+            "completed",
+            "cancelled",
+            "canceled",
+            "failed",
+            "refunded",
+        )
+    ):
+        return False
+
+    return any(
+        keyword in lowered
+        for keyword in (
+            "prepar",
+            "on the way",
+            "arriving",
+            "picked up",
+            "heading",
+            "dasher",
+            "delivery",
+            "driver",
+            "shopping",
+            "pickup",
+            "in progress",
+            "accepted",
+            "confirmed",
+            "placing",
+            "placed",
+            "order received",
+            "being made",
+            "ready soon",
+        )
     )
