@@ -861,6 +861,10 @@ def _extract_total(candidate: dict[str, Any]) -> tuple[str | None, float | None]
     )
     if nested is not None:
         return _normalize_money(nested)
+
+    fallback = _find_best_money_value(candidate)
+    if fallback is not None:
+        return fallback
     return None, None
 
 
@@ -885,23 +889,6 @@ def _extract_dasher_name(candidate: dict[str, Any]) -> str | None:
         value = _first_value(nested, "name", "display_name", "first_name")
         if isinstance(value, str) and value.strip():
             return value.strip()
-
-    nested_value = _find_nested_value(
-        candidate,
-        "dasher_name",
-        "dasherName",
-        "courier_name",
-        "courierName",
-        "driver_name",
-        "driverName",
-        "name",
-        "display_name",
-        "displayName",
-        "first_name",
-        "firstName",
-    )
-    if isinstance(nested_value, str) and nested_value.strip():
-        return nested_value.strip()
     return None
 
 
@@ -1054,6 +1041,86 @@ def _normalize_item_list(value: list[Any]) -> list[dict[str, Any]]:
         items.append({"name": name.strip(), "quantity": quantity})
 
     return items
+
+
+def _find_best_money_value(candidate: dict[str, Any]) -> tuple[str | None, float | None] | None:
+    """Search nested payloads for the most likely order-total money field."""
+    best_score = -1
+    best_value: tuple[str | None, float | None] | None = None
+    queue: list[Any] = [candidate]
+    seen: set[int] = set()
+
+    while queue:
+        current = queue.pop(0)
+        current_id = id(current)
+        if current_id in seen:
+            continue
+        seen.add(current_id)
+
+        if isinstance(current, dict):
+            for key, value in current.items():
+                if isinstance(value, (dict, list)):
+                    queue.append(value)
+
+                score = _score_money_candidate(key, value)
+                if score <= best_score:
+                    continue
+
+                normalized = _normalize_money(value)
+                if normalized == (None, None):
+                    continue
+
+                best_score = score
+                best_value = normalized
+            continue
+
+        if isinstance(current, list):
+            queue.extend(item for item in current if isinstance(item, (dict, list)))
+
+    return best_value
+
+
+def _score_money_candidate(key: str, value: Any) -> int:
+    """Score how likely a key/value pair is to represent the full order total."""
+    lowered = key.lower()
+
+    if any(
+        token in lowered
+        for token in (
+            "tip",
+            "tax",
+            "fee",
+            "discount",
+            "saving",
+            "savings",
+            "credit",
+            "refund",
+            "item_total",
+            "unit_price",
+        )
+    ):
+        return -1
+
+    normalized = _normalize_money(value)
+    if normalized == (None, None):
+        return -1
+
+    if any(token in lowered for token in ("grand_total", "grandtotal", "order_total", "ordertotal")):
+        return 8
+    if any(token in lowered for token in ("amount_charged", "amountcharged", "charged_total")):
+        return 7
+    if "display_total" in lowered:
+        return 6
+    if "total" in lowered:
+        return 5
+    if "subtotal" in lowered or "sub_total" in lowered:
+        return 3
+    if "amount" in lowered:
+        return 2
+    if "price" in lowered:
+        return 1
+
+    return 0
 
 
 def _normalize_money(value: Any) -> tuple[str | None, float | None]:
