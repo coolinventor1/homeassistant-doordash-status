@@ -580,8 +580,16 @@ def _extract_status(candidate: dict[str, Any]) -> Any:
         "status",
         "delivery_status",
         "deliveryStatus",
+        "fulfillment_status",
+        "fulfillmentStatus",
         "status_text",
         "statusText",
+        "status_description",
+        "statusDescription",
+        "progress_label",
+        "progressLabel",
+        "current_status",
+        "currentStatus",
         "phase",
         "state",
     ):
@@ -591,6 +599,38 @@ def _extract_status(candidate: dict[str, Any]) -> Any:
         if isinstance(value, dict):
             return _first_value(value, "label", "text", "display_string", "value")
         return value
+
+    nested = _find_nested_value(
+        candidate,
+        "order_status",
+        "orderStatus",
+        "status",
+        "delivery_status",
+        "deliveryStatus",
+        "fulfillment_status",
+        "fulfillmentStatus",
+        "status_text",
+        "statusText",
+        "status_description",
+        "statusDescription",
+        "progress_label",
+        "progressLabel",
+        "current_status",
+        "currentStatus",
+        "phase",
+        "state",
+    )
+    if isinstance(nested, dict):
+        return _first_value(
+            nested,
+            "label",
+            "text",
+            "display_string",
+            "displayString",
+            "description",
+            "value",
+        )
+    return nested
     return None
 
 
@@ -669,6 +709,21 @@ def _extract_store_name(candidate: dict[str, Any]) -> str | None:
             value = _first_value(nested, "name", "business_name", "display_name")
             if isinstance(value, str) and value.strip():
                 return value.strip()
+
+    nested_value = _find_nested_value(
+        candidate,
+        "store_name",
+        "storeName",
+        "merchant_name",
+        "merchantName",
+        "business_name",
+        "businessName",
+        "display_name",
+        "displayName",
+        "name",
+    )
+    if isinstance(nested_value, str) and nested_value.strip():
+        return nested_value.strip()
     return None
 
 
@@ -699,10 +754,22 @@ def _extract_eta(candidate: dict[str, Any]) -> tuple[datetime | None, str | None
                     "time",
                     "timestamp",
                     "iso",
+                    "datetime",
+                    "dateTime",
                     "value",
                 )
             )
-            eta_text = _stringify(_first_value(value, "display_string", "label", "text", "value"))
+            eta_text = _stringify(
+                _first_value(
+                    value,
+                    "display_string",
+                    "displayString",
+                    "label",
+                    "text",
+                    "description",
+                    "value",
+                )
+            )
             return eta_at, eta_text
         eta_at = _parse_any_datetime(value)
         return eta_at, _stringify(value)
@@ -710,6 +777,49 @@ def _extract_eta(candidate: dict[str, Any]) -> tuple[datetime | None, str | None
     eta_range = candidate.get("eta_minutes") or candidate.get("eta_range")
     if isinstance(eta_range, (str, int, float)):
         return None, _stringify(eta_range)
+
+    nested = _find_nested_value(
+        candidate,
+        "eta",
+        "eta_text",
+        "etaText",
+        "estimated_arrival",
+        "estimatedArrival",
+        "estimated_delivery_time",
+        "estimatedDeliveryTime",
+        "delivery_eta",
+        "deliveryEta",
+        "arrival_time",
+        "arrivalTime",
+        "dropoff_time",
+        "dropoffTime",
+    )
+    if isinstance(nested, dict):
+        eta_at = _parse_any_datetime(
+            _first_value(
+                nested,
+                "time",
+                "timestamp",
+                "iso",
+                "datetime",
+                "dateTime",
+                "value",
+            )
+        )
+        eta_text = _stringify(
+            _first_value(
+                nested,
+                "display_string",
+                "displayString",
+                "label",
+                "text",
+                "description",
+                "value",
+            )
+        )
+        return eta_at, eta_text
+    if nested is not None:
+        return _parse_any_datetime(nested), _stringify(nested)
 
     return None, None
 
@@ -732,6 +842,25 @@ def _extract_total(candidate: dict[str, Any]) -> tuple[str | None, float | None]
         if key not in candidate:
             continue
         return _normalize_money(candidate[key])
+
+    nested = _find_nested_value(
+        candidate,
+        "total",
+        "total_price",
+        "totalPrice",
+        "order_total",
+        "orderTotal",
+        "grand_total",
+        "grandTotal",
+        "subtotal",
+        "subTotal",
+        "display_total",
+        "displayTotal",
+        "amount_charged",
+        "amountCharged",
+    )
+    if nested is not None:
+        return _normalize_money(nested)
     return None, None
 
 
@@ -756,6 +885,23 @@ def _extract_dasher_name(candidate: dict[str, Any]) -> str | None:
         value = _first_value(nested, "name", "display_name", "first_name")
         if isinstance(value, str) and value.strip():
             return value.strip()
+
+    nested_value = _find_nested_value(
+        candidate,
+        "dasher_name",
+        "dasherName",
+        "courier_name",
+        "courierName",
+        "driver_name",
+        "driverName",
+        "name",
+        "display_name",
+        "displayName",
+        "first_name",
+        "firstName",
+    )
+    if isinstance(nested_value, str) and nested_value.strip():
+        return nested_value.strip()
     return None
 
 
@@ -778,7 +924,15 @@ def _extract_items(candidate: dict[str, Any]) -> list[dict[str, Any]]:
         for item in value:
             if not isinstance(item, dict):
                 continue
-            name = _first_value(item, "name", "title", "item_name")
+            name = _first_value(
+                item,
+                "name",
+                "title",
+                "item_name",
+                "itemName",
+                "display_name",
+                "displayName",
+            )
             if not isinstance(name, str) or not name.strip():
                 continue
             quantity = item.get("quantity") or item.get("count") or 1
@@ -789,7 +943,117 @@ def _extract_items(candidate: dict[str, Any]) -> list[dict[str, Any]]:
             items.append({"name": name.strip(), "quantity": quantity})
         return items
 
+    nested_items = _find_nested_items(candidate)
+    if nested_items:
+        return nested_items
+
     return []
+
+
+def _find_nested_value(candidate: dict[str, Any], *keys: str) -> Any:
+    """Find the first matching key anywhere in a nested payload."""
+    queue: list[Any] = [candidate]
+    seen: set[int] = set()
+
+    while queue:
+        current = queue.pop(0)
+        if not isinstance(current, dict):
+            continue
+
+        current_id = id(current)
+        if current_id in seen:
+            continue
+        seen.add(current_id)
+
+        for key in keys:
+            value = current.get(key)
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            return value
+
+        for value in current.values():
+            if isinstance(value, dict):
+                queue.append(value)
+            elif isinstance(value, list):
+                queue.extend(item for item in value if isinstance(item, dict))
+
+    return None
+
+
+def _find_nested_items(candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    """Search nested lists for item-like entries."""
+    queue: list[Any] = [candidate]
+    seen: set[int] = set()
+
+    while queue:
+        current = queue.pop(0)
+        current_id = id(current)
+        if current_id in seen:
+            continue
+        seen.add(current_id)
+
+        if isinstance(current, list):
+            normalized = _normalize_item_list(current)
+            if normalized:
+                return normalized
+            queue.extend(item for item in current if isinstance(item, (dict, list)))
+            continue
+
+        if isinstance(current, dict):
+            queue.extend(
+                value for value in current.values() if isinstance(value, (dict, list))
+            )
+
+    return []
+
+
+def _normalize_item_list(value: list[Any]) -> list[dict[str, Any]]:
+    """Normalize an item-like list into name/quantity pairs."""
+    items: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+
+        name = _first_value(
+            item,
+            "name",
+            "title",
+            "item_name",
+            "itemName",
+            "display_name",
+            "displayName",
+        )
+        if not isinstance(name, str) or not name.strip():
+            nested_name = _find_nested_value(
+                item,
+                "name",
+                "title",
+                "item_name",
+                "itemName",
+                "display_name",
+                "displayName",
+            )
+            if not isinstance(nested_name, str) or not nested_name.strip():
+                continue
+            name = nested_name
+
+        quantity = (
+            item.get("quantity")
+            or item.get("count")
+            or item.get("item_quantity")
+            or item.get("itemQuantity")
+            or 1
+        )
+        try:
+            quantity = int(quantity)
+        except (TypeError, ValueError):
+            quantity = 1
+
+        items.append({"name": name.strip(), "quantity": quantity})
+
+    return items
 
 
 def _normalize_money(value: Any) -> tuple[str | None, float | None]:
