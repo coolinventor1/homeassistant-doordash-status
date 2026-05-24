@@ -1,0 +1,46 @@
+{
+  "title": "DoorDash Status",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect DoorDash",
+        "description": "Choose how Home Assistant should read your DoorDash order status.",
+        "data": {
+          "auth_mode": "Connection method"
+        }
+      },
+      "tracking_url": {
+        "title": "Tracking link",
+        "description": "Paste a DoorDash tracking URL from an order email or message.",
+        "data": {
+          "tracking_url": "Tracking URL"
+        }
+      },
+      "browser_session": {
+        "title": "Browser session cookie",
+        "description": "Paste your DoorDash browser Cookie header from a logged-in request. This is unofficial and may stop working when DoorDash changes its site.",
+        "data": {
+          "base_url": "DoorDash base URL",
+          "browser_cookie": "Browser Cookie header value"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to reach DoorDash.",
+      "invalid_auth": "DoorDash rejected the current browser session.",
+      "invalid_url": "The provided URL is invalid.",
+      "cannot_use_tracking_url": "DoorDash did not accept that tracking URL.",
+      "unknown": "Unexpected error while validating DoorDash."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "DoorDash Status options",
+        "data": {
+          "scan_interval_minutes": "Refresh interval (minutes)"
+        }
+      }
+    }
+  }
+}
