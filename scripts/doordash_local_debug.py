@@ -5,8 +5,8 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 from pathlib import Path
-import sys
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -14,6 +14,7 @@ from urllib.request import Request, urlopen
 DEFAULT_BASE_URL = "https://www.doordash.com"
 DEFAULT_PAGE_URL = f"{DEFAULT_BASE_URL}/orders/"
 DEFAULT_TIMEOUT_SECONDS = 30
+DEFAULT_COOKIE_FILES = ("cookie.txt", ".cookie.txt")
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -29,11 +30,16 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "the Home Assistant custom integration."
         )
     )
-    source = parser.add_mutually_exclusive_group(required=True)
+    source = parser.add_mutually_exclusive_group()
     source.add_argument(
         "--html",
         type=Path,
         help="Path to a saved DoorDash orders HTML file to parse.",
+    )
+    source.add_argument(
+        "--live",
+        action="store_true",
+        help="Force a live DoorDash fetch instead of parsing saved HTML.",
     )
     source.add_argument(
         "--cookie-file",
@@ -81,12 +87,27 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _load_cookie(args: argparse.Namespace) -> str | None:
-    """Load a cookie value from CLI arguments."""
+def _resolve_default_cookie_file(repo_root: Path) -> Path | None:
+    """Return the first default cookie file that exists in the repo root."""
+    for filename in DEFAULT_COOKIE_FILES:
+        candidate = repo_root / filename
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _load_cookie(args: argparse.Namespace, repo_root: Path) -> str | None:
+    """Load a cookie value from CLI arguments, env vars, or default files."""
     if args.cookie is not None:
         return args.cookie.strip()
     if args.cookie_file is not None:
         return args.cookie_file.read_text(encoding="utf-8").strip()
+    if env_cookie := os.getenv("DOORDASH_COOKIE"):
+        return env_cookie.strip()
+
+    default_cookie_file = _resolve_default_cookie_file(repo_root)
+    if default_cookie_file is not None:
+        return default_cookie_file.read_text(encoding="utf-8").strip()
     return None
 
 
@@ -194,9 +215,12 @@ def main() -> int:
         html = args.html.read_text(encoding="utf-8")
         source_url = args.page_url
     else:
-        cookie_header = _load_cookie(args)
+        cookie_header = _load_cookie(args, repo_root)
         if not cookie_header:
-            raise SystemExit("A non-empty DoorDash cookie value is required to fetch live pages.")
+            raise SystemExit(
+                "A live DoorDash fetch requires a cookie via --cookie, --cookie-file, "
+                "a DOORDASH_COOKIE environment variable, or a repo-level cookie.txt file."
+            )
         html, source_url = _fetch_html(
             cookie_header=cookie_header,
             base_url=args.base_url,

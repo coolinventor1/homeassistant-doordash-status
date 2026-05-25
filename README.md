@@ -68,16 +68,28 @@ As long as the DoorDash session stays valid, Home Assistant should continue trac
 
 You can debug the parser locally without reinstalling the Home Assistant integration on every change.
 
+Live fetch the current DoorDash orders page:
+
+```powershell
+python .\scripts\doordash_local_debug.py
+```
+
+The script will automatically use either:
+
+- `DOORDASH_COOKIE` from your environment
+- `.\cookie.txt` in the repo root
+- `.\.cookie.txt` in the repo root
+
+You can still pass a cookie explicitly and save the fetched snapshot:
+
+```powershell
+python .\scripts\doordash_local_debug.py --cookie-file .\cookie.txt --save-html .\orders_snapshot.html
+```
+
 Parse a saved DoorDash orders HTML file:
 
 ```powershell
 python .\scripts\doordash_local_debug.py --html .\orders_snapshot.html
-```
-
-Fetch your live DoorDash orders page with a browser cookie and save the snapshot:
-
-```powershell
-python .\scripts\doordash_local_debug.py --cookie-file .\cookie.txt --save-html .\orders_snapshot.html
 ```
 
 The script prints a compact summary plus the normalized order JSON using the same parser logic as the integration.
