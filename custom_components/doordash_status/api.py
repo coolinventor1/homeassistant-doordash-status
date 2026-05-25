@@ -274,6 +274,34 @@ class _ScriptCollector(HTMLParser):
         self._current_parts.append(data)
 
 
+class _VisibleTextCollector(HTMLParser):
+    """Collect visible text chunks from an HTML document."""
+
+    def __init__(self) -> None:
+        """Initialize the parser."""
+        super().__init__()
+        self.text_chunks: list[str] = []
+        self._ignored_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        """Ignore script/style content."""
+        if tag in {"script", "style", "noscript"}:
+            self._ignored_depth += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        """Resume collection after ignored tags."""
+        if tag in {"script", "style", "noscript"} and self._ignored_depth > 0:
+            self._ignored_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        """Collect non-empty visible text chunks."""
+        if self._ignored_depth > 0:
+            return
+        cleaned = " ".join(data.split())
+        if cleaned:
+            self.text_chunks.append(cleaned)
+
+
 def _looks_like_login_page(final_url: str, html: str) -> bool:
     """Return whether the response appears to be a sign-in page."""
     lowered_url = final_url.lower()
@@ -293,6 +321,7 @@ def _extract_orders_from_html(html: str, page_url: str) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     for payload in _extract_json_payloads(collector.scripts):
         candidates.extend(_find_orders(payload, page_url))
+    candidates.extend(_extract_order_summaries_from_text(html, page_url))
 
     orders = _merge_orders(candidates)
 
@@ -392,6 +421,152 @@ def _extract_structured_values_from_text(text: str) -> list[Any]:
             values.append(parsed_suffix)
 
     return values
+
+
+def _extract_order_summaries_from_text(html: str, page_url: str) -> list[dict[str, Any]]:
+    """Extract order-history summaries from visible DoorDash page text."""
+    collector = _VisibleTextCollector()
+    collector.feed(html)
+
+    chunks = collector.text_chunks
+    summaries: list[dict[str, Any]] = []
+    for index, chunk in enumerate(chunks):
+        meta = _parse_order_meta_line(chunk)
+        if meta is None or index == 0:
+            continue
+
+        store_name = chunks[index - 1]
+        if not _looks_like_store_name(store_name):
+            continue
+
+        date_text = chunks[index - 2] if index >= 2 else None
+        items_line = chunks[index + 1] if index + 1 < len(chunks) else None
+        items = _parse_items_line(items_line, meta["item_count"])
+        created_at = _parse_relative_order_date(date_text)
+        order_id = f"{store_name}|{meta['total_display']}|{date_text or index}"
+
+        summaries.append(
+            {
+                "id": order_id,
+                "source_order_id": None,
+                "status": "Completed",
+                "store_name": store_name,
+                "eta_at": None,
+                "eta_text": None,
+                "updated_at": created_at,
+                "created_at": created_at,
+                "total_display": meta["total_display"],
+                "total_amount": meta["total_amount"],
+                "fulfillment_type": meta["fulfillment_type"],
+                "tracking_url": None,
+                "help_url": None,
+                "dasher_name": None,
+                "items": items,
+                "item_count": meta["item_count"],
+                "confidence": 8,
+                "status_candidates": [{"key": "visible_order_history", "value": "Completed"}],
+                "money_candidates": [
+                    {
+                        "key": "visible_order_history",
+                        "label": "total",
+                        "display": meta["total_display"],
+                        "amount": meta["total_amount"],
+                        "score": 10,
+                    }
+                ],
+            }
+        )
+
+    return summaries
+
+
+def _parse_order_meta_line(text: str) -> dict[str, Any] | None:
+    """Parse a visible order meta line like '$48.22 • 3 items • Personal'."""
+    parts = [part.strip() for part in re.split(r"\s*[•·]\s*", text) if part.strip()]
+    if len(parts) < 2:
+        return None
+
+    total_display = parts[0]
+    if not _looks_like_money_string(total_display):
+        return None
+
+    item_count_match = re.search(r"(\d+)\s+items?", parts[1], re.IGNORECASE)
+    if item_count_match is None:
+        return None
+
+    total_amount = _normalize_money_number(total_display)
+    item_count = int(item_count_match.group(1))
+    fulfillment_type = parts[2] if len(parts) >= 3 else None
+
+    return {
+        "total_display": total_display,
+        "total_amount": total_amount,
+        "item_count": item_count,
+        "fulfillment_type": fulfillment_type,
+    }
+
+
+def _parse_items_line(text: str | None, expected_count: int) -> list[dict[str, Any]]:
+    """Parse an item-summary line separated by bullets."""
+    if text is None:
+        return [{"name": f"Item {index + 1}", "quantity": 1} for index in range(expected_count)]
+
+    parts = [part.strip() for part in re.split(r"\s*[•·]\s*", text) if part.strip()]
+    if not parts:
+        return [{"name": f"Item {index + 1}", "quantity": 1} for index in range(expected_count)]
+
+    return [{"name": part, "quantity": 1} for part in parts[:expected_count]]
+
+
+def _looks_like_store_name(value: str | None) -> bool:
+    """Return whether a visible text chunk looks like a merchant name."""
+    if value is None:
+        return False
+
+    cleaned = value.strip()
+    if not cleaned:
+        return False
+    if _looks_like_money_string(cleaned):
+        return False
+    if re.search(r"\d+\s+items?", cleaned, re.IGNORECASE):
+        return False
+    if cleaned.lower().startswith(("yesterday", "today")):
+        return False
+    return True
+
+
+def _parse_relative_order_date(text: str | None) -> datetime | None:
+    """Parse visible relative order dates like 'Yesterday, May 24'."""
+    if text is None:
+        return None
+
+    lowered = text.lower()
+    now = dt_util.now()
+    if lowered.startswith("today"):
+        return dt_util.start_of_local_day(now)
+    if lowered.startswith("yesterday"):
+        return dt_util.start_of_local_day(now - timedelta(days=1))
+
+    month_day_match = re.search(r"([A-Za-z]+)\s+(\d{1,2})", text)
+    if month_day_match is None:
+        return None
+
+    try:
+        parsed = datetime.strptime(
+            f"{month_day_match.group(1)} {month_day_match.group(2)} {now.year}",
+            "%B %d %Y",
+        )
+    except ValueError:
+        try:
+            parsed = datetime.strptime(
+                f"{month_day_match.group(1)} {month_day_match.group(2)} {now.year}",
+                "%b %d %Y",
+            )
+        except ValueError:
+            return None
+
+    local_tz = dt_util.as_local(now).tzinfo or dt_util.UTC
+    return parsed.replace(tzinfo=local_tz)
 
 
 def _iter_json_substrings(text: str) -> Iterable[str]:
@@ -516,6 +691,14 @@ def _orders_match(left: dict[str, Any], right: dict[str, Any]) -> bool:
         if left_time and right_time and abs((left_time - right_time).total_seconds()) <= 7200:
             return True
 
+        if (
+            left_time
+            and right_time
+            and (_is_visible_summary_candidate(left) or _is_visible_summary_candidate(right))
+            and dt_util.as_local(left_time).date() == dt_util.as_local(right_time).date()
+        ):
+            return True
+
         left_total = left.get("total_amount")
         right_total = right.get("total_amount")
         if (
@@ -548,8 +731,16 @@ def _merge_order_into(target: dict[str, Any], incoming: dict[str, Any]) -> None:
     if target.get("total_amount") is None and incoming.get("total_amount") is not None:
         target["total_amount"] = incoming["total_amount"]
 
-    if not target.get("items") and incoming.get("items"):
+    if _should_replace_items(target, incoming):
         target["items"] = incoming["items"]
+    if target.get("item_count") is None and incoming.get("item_count") is not None:
+        target["item_count"] = incoming["item_count"]
+    elif (
+        isinstance(target.get("item_count"), int)
+        and isinstance(incoming.get("item_count"), int)
+        and incoming["item_count"] > target["item_count"]
+    ):
+        target["item_count"] = incoming["item_count"]
 
     target["status_candidates"] = _merge_candidate_lists(
         target.get("status_candidates", []),
@@ -592,6 +783,57 @@ def _merge_candidate_lists(
         seen.add(marker)
         merged.append(candidate)
     return merged[:10]
+
+
+def _is_visible_summary_candidate(order: dict[str, Any]) -> bool:
+    """Return whether an order candidate came from visible order-history text."""
+    return any(
+        candidate.get("key") == "visible_order_history"
+        for candidate in order.get("status_candidates", [])
+        if isinstance(candidate, dict)
+    )
+
+
+def _should_replace_items(target: dict[str, Any], incoming: dict[str, Any]) -> bool:
+    """Return whether incoming items look more complete than the current ones."""
+    incoming_items = incoming.get("items")
+    if not incoming_items:
+        return False
+
+    target_items = target.get("items")
+    if not target_items:
+        return True
+
+    incoming_count = _effective_item_count(incoming)
+    target_count = _effective_item_count(target)
+    if incoming_count > target_count:
+        return True
+
+    if len(incoming_items) > len(target_items) and not _items_are_placeholders(incoming_items):
+        return True
+
+    return _items_are_placeholders(target_items) and not _items_are_placeholders(incoming_items)
+
+
+def _effective_item_count(order: dict[str, Any]) -> int:
+    """Return the best available item count for an order candidate."""
+    count = order.get("item_count")
+    if isinstance(count, int) and count >= 0:
+        return count
+    items = order.get("items") or []
+    if isinstance(items, list):
+        return len(items)
+    return 0
+
+
+def _items_are_placeholders(items: list[dict[str, Any]]) -> bool:
+    """Return whether an item list only contains synthetic placeholder entries."""
+    return all(
+        isinstance(item, dict)
+        and isinstance(item.get("name"), str)
+        and item["name"].startswith("Item ")
+        for item in items
+    )
 
 
 def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict[str, Any] | None:
@@ -710,6 +952,7 @@ def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict
         "help_url": help_url,
         "dasher_name": dasher_name,
         "items": items,
+        "item_count": len(items) if items else None,
         "confidence": confidence,
         "status_candidates": status_candidates,
         "money_candidates": money_candidates,

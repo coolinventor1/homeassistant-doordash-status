@@ -45,6 +45,7 @@ def _serialize_order(order: dict[str, Any] | None) -> dict[str, Any] | None:
         "help_url": order.get("help_url"),
         "dasher_name": order.get("dasher_name"),
         "items": order.get("items"),
+        "item_count": order.get("item_count"),
         "confidence": order.get("confidence"),
         "source_order_id": order.get("source_order_id"),
         "status_candidates": order.get("status_candidates"),
@@ -77,6 +78,21 @@ def _format_total_value(order: dict[str, Any] | None) -> str | None:
         return f"${amount:.2f}"
 
     return None
+
+
+def _item_count_value(order: dict[str, Any] | None) -> int:
+    """Return the best available item count for the latest order."""
+    if order is None:
+        return 0
+
+    count = order.get("item_count")
+    if isinstance(count, int) and count >= 0:
+        return count
+
+    items = order.get("items") or []
+    if isinstance(items, list):
+        return len(items)
+    return 0
 
 
 SENSOR_DESCRIPTIONS: tuple[DoorDashSensorDescription, ...] = (
@@ -142,7 +158,7 @@ SENSOR_DESCRIPTIONS: tuple[DoorDashSensorDescription, ...] = (
         key="latest_order_item_count",
         name="Latest order item count",
         icon="mdi:cart-outline",
-        value_fn=lambda data: len(data.latest_order.get("items", [])) if data.latest_order else 0,
+        value_fn=lambda data: _item_count_value(data.latest_order),
         attrs_fn=lambda data: {
             "items": data.latest_order.get("items") if data.latest_order else [],
             "latest_order": _serialize_order(data.latest_order),
