@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import datetime, timedelta
 from html.parser import HTMLParser
 import json
 import logging
@@ -512,6 +512,7 @@ def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict
         )
     )
     total_display, total_amount = _extract_total(candidate)
+    total_display = _normalize_total_display(total_display, total_amount)
     fulfillment_type = _stringify(
         _first_value(candidate, "fulfillment_type", "fulfillmentType", "delivery_type")
     )
@@ -548,6 +549,13 @@ def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict
     )
     if confidence < 3:
         return None
+
+    status = _derive_status(
+        status=status,
+        created_at=created_at,
+        updated_at=updated_at,
+        eta_at=eta_at,
+    )
 
     synthetic_id = order_id or tracking_url or help_url or f"{store_name}:{status}:{eta_text}"
     if synthetic_id is None:
@@ -631,7 +639,6 @@ def _extract_status(candidate: dict[str, Any]) -> Any:
             "value",
         )
     return nested
-    return None
 
 
 def _normalize_status(status: str | None) -> str | None:
@@ -653,6 +660,32 @@ def _normalize_status(status: str | None) -> str | None:
         return None
 
     return normalized
+
+
+def _derive_status(
+    *,
+    status: str | None,
+    created_at: datetime | None,
+    updated_at: datetime | None,
+    eta_at: datetime | None,
+) -> str | None:
+    """Provide a conservative fallback status when DoorDash omits one."""
+    if status is not None:
+        return status
+
+    now = dt_util.utcnow()
+    reference_time = updated_at or created_at
+
+    if eta_at is not None and eta_at >= now:
+        return "In progress"
+
+    if reference_time is None:
+        return None
+
+    if now - reference_time >= timedelta(minutes=30):
+        return "Completed"
+
+    return None
 
 
 def _score_order_candidate(
@@ -1220,6 +1253,18 @@ def _extract_money_label(value: Any) -> str:
     return label.strip().lower()
 
 
+def _normalize_total_display(display: str | None, amount: float | None) -> str | None:
+    """Return a stable human-readable total value."""
+    if display is not None:
+        stripped = display.strip()
+        if stripped and _looks_like_money_string(stripped):
+            return stripped
+
+    if amount is None:
+        return None
+    return f"${amount:.2f}"
+
+
 def _normalize_money(value: Any) -> tuple[str | None, float | None]:
     """Normalize various DoorDash money payloads into display + float amount."""
     if value is None:
@@ -1227,10 +1272,44 @@ def _normalize_money(value: Any) -> tuple[str | None, float | None]:
 
     if isinstance(value, dict):
         display = _stringify(
-            _first_value(value, "display_string", "formatted_amount", "label")
+            _first_value(
+                value,
+                "display_string",
+                "displayString",
+                "formatted_amount",
+                "formattedAmount",
+                "amount_display",
+                "amountDisplay",
+            )
         )
-        numeric = _first_value(value, "amount", "value", "unit_amount", "cents")
+        numeric = _first_value(
+            value,
+            "amount",
+            "value",
+            "unit_amount",
+            "unitAmount",
+            "cents",
+            "price",
+        )
         amount = _normalize_money_number(numeric)
+
+        if display is None and isinstance(numeric, str):
+            candidate_display = numeric.strip()
+            if _looks_like_money_string(candidate_display):
+                display = candidate_display
+
+        if amount is None:
+            nested_money = _first_value(
+                value,
+                "money",
+                "amount_info",
+                "amountInfo",
+                "price_info",
+                "priceInfo",
+            )
+            if nested_money is not None and nested_money is not value:
+                display, amount = _normalize_money(nested_money)
+
         if display is None and amount is not None:
             display = f"${amount:.2f}"
         return display, amount
@@ -1250,8 +1329,22 @@ def _normalize_money(value: Any) -> tuple[str | None, float | None]:
     return None, None
 
 
+def _looks_like_money_string(value: str) -> bool:
+    """Return whether a string resembles a currency amount rather than a label."""
+    return bool(re.search(r"\$?\s*-?\d+(?:,\d{3})*(?:\.\d{2})?", value))
+
+
 def _normalize_money_number(value: Any) -> float | None:
     """Convert DoorDash numeric money values into dollars when possible."""
+    if isinstance(value, str):
+        cleaned = value.strip().replace(",", "")
+        if not cleaned:
+            return None
+        match = re.search(r"-?\d+(?:\.\d+)?", cleaned)
+        if match is None:
+            return None
+        value = match.group(0)
+
     try:
         numeric = float(value)
     except (TypeError, ValueError):

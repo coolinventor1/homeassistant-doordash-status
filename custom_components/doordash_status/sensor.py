@@ -60,6 +60,22 @@ def _serialize_orders(orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def _format_total_value(order: dict[str, Any] | None) -> str | None:
+    """Return a stable state value for the latest total sensor."""
+    if order is None:
+        return None
+
+    display = order.get("total_display")
+    if isinstance(display, str) and display.strip():
+        return display.strip()
+
+    amount = order.get("total_amount")
+    if isinstance(amount, (int, float)):
+        return f"${amount:.2f}"
+
+    return None
+
+
 SENSOR_DESCRIPTIONS: tuple[DoorDashSensorDescription, ...] = (
     DoorDashSensorDescription(
         key="active_orders",
@@ -113,7 +129,7 @@ SENSOR_DESCRIPTIONS: tuple[DoorDashSensorDescription, ...] = (
         key="latest_order_total",
         name="Latest order total",
         icon="mdi:currency-usd",
-        value_fn=lambda data: data.latest_order.get("total_display") if data.latest_order else None,
+        value_fn=lambda data: _format_total_value(data.latest_order),
         attrs_fn=lambda data: {
             "total_amount": data.latest_order.get("total_amount") if data.latest_order else None,
             "latest_order": _serialize_order(data.latest_order),
