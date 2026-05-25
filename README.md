@@ -94,6 +94,8 @@ python .\scripts\doordash_local_debug.py --html .\orders_snapshot.html
 
 The script prints a compact summary plus the normalized order JSON using the same parser logic as the integration.
 
+Add `--print-json` if you want the full normalized JSON on stdout as well.
+
 ## Notes
 
 - Browser-session mode is unofficial and may stop working if DoorDash changes its website.

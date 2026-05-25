@@ -79,6 +79,11 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         help="Optional path to save the parsed orders JSON.",
     )
     parser.add_argument(
+        "--print-json",
+        action="store_true",
+        help="Print the full normalized orders JSON to stdout after the summary.",
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=5,
@@ -235,7 +240,8 @@ def main() -> int:
     _print_summary(orders, source_url=source_url, limit=max(args.limit, 0))
 
     serialized = json.dumps(orders, indent=2, default=str)
-    print(serialized)
+    if args.print_json:
+        print(serialized)
 
     if args.json_out is not None:
         args.json_out.parent.mkdir(parents=True, exist_ok=True)

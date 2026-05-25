@@ -497,10 +497,10 @@ def _extract_order_summaries_from_text(html: str, page_url: str) -> list[dict[st
     collector = _VisibleTextCollector()
     collector.feed(html)
 
-    chunks = collector.text_chunks
+    chunks = _sanitize_visible_chunks(collector.text_chunks)
     summaries: list[dict[str, Any]] = []
-    for index, chunk in enumerate(chunks):
-        meta = _parse_order_meta_line(chunk)
+    for index, _chunk in enumerate(chunks):
+        meta, meta_span = _parse_visible_order_meta(chunks, index)
         if meta is None or index == 0:
             continue
 
@@ -509,7 +509,7 @@ def _extract_order_summaries_from_text(html: str, page_url: str) -> list[dict[st
             continue
 
         date_text = chunks[index - 2] if index >= 2 else None
-        items_line = chunks[index + 1] if index + 1 < len(chunks) else None
+        items_line = chunks[index + meta_span] if index + meta_span < len(chunks) else None
         items = _parse_items_line(items_line, meta["item_count"])
         created_at = _parse_relative_order_date(date_text)
         order_id = f"{store_name}|{meta['total_display']}|{date_text or index}"
@@ -549,6 +549,38 @@ def _extract_order_summaries_from_text(html: str, page_url: str) -> list[dict[st
     return summaries
 
 
+def _sanitize_visible_chunks(chunks: list[str]) -> list[str]:
+    """Drop boilerplate text chunks that interfere with history parsing."""
+    ignored = {"Icon Loading"}
+    return [chunk for chunk in chunks if chunk not in ignored]
+
+
+def _parse_visible_order_meta(
+    chunks: list[str],
+    index: int,
+) -> tuple[dict[str, Any] | None, int]:
+    """Parse a visible order meta line that may be split across multiple chunks."""
+    if index >= len(chunks):
+        return None, 0
+
+    start = chunks[index]
+    if not _looks_like_money_fragment(start):
+        return None, 0
+
+    candidates: list[tuple[str, int]] = [(start, 1)]
+    if index + 1 < len(chunks) and _looks_like_item_count_fragment(chunks[index + 1]):
+        candidates.append((f"{start} {chunks[index + 1]}", 2))
+        if index + 2 < len(chunks) and _looks_like_fulfillment_fragment(chunks[index + 2]):
+            candidates.append((f"{start} {chunks[index + 1]} {chunks[index + 2]}", 3))
+
+    for text, span in reversed(candidates):
+        parsed = _parse_order_meta_line(text)
+        if parsed is not None:
+            return parsed, span
+
+    return None, 0
+
+
 def _parse_order_meta_line(text: str) -> dict[str, Any] | None:
     """Parse a visible order meta line like '$48.22 • 3 items • Personal'."""
     parts = [part.strip() for part in re.split(r"\s*[•·]\s*", text) if part.strip()]
@@ -575,6 +607,24 @@ def _parse_order_meta_line(text: str) -> dict[str, Any] | None:
     }
 
 
+def _looks_like_money_fragment(text: str) -> bool:
+    """Return whether a visible text chunk can start an order meta line."""
+    return _looks_like_money_string(text.strip().rstrip("•").strip())
+
+
+def _looks_like_item_count_fragment(text: str) -> bool:
+    """Return whether a chunk looks like the middle order-meta item count."""
+    return re.fullmatch(r"\d+\s+items?", text.strip(), re.IGNORECASE) is not None
+
+
+def _looks_like_fulfillment_fragment(text: str) -> bool:
+    """Return whether a chunk looks like the trailing order-meta fulfillment segment."""
+    cleaned = text.strip()
+    if cleaned.startswith("•"):
+        cleaned = cleaned.lstrip("•").strip()
+    return cleaned in {"Personal", "Business", "Group"}
+
+
 def _parse_items_line(text: str | None, expected_count: int) -> list[dict[str, Any]]:
     """Parse an item-summary line separated by bullets."""
     if text is None:
@@ -584,7 +634,11 @@ def _parse_items_line(text: str | None, expected_count: int) -> list[dict[str, A
     if not parts:
         return [{"name": f"Item {index + 1}", "quantity": 1} for index in range(expected_count)]
 
-    return [{"name": part, "quantity": 1} for part in parts[:expected_count]]
+    items = [{"name": part, "quantity": 1} for part in parts[:expected_count]]
+    overflow = expected_count - len(items)
+    if overflow > 0 and items:
+        items[-1]["quantity"] += overflow
+    return items
 
 
 def _looks_like_store_name(value: str | None) -> bool:
@@ -777,12 +831,6 @@ def _orders_match(left: dict[str, Any], right: dict[str, Any]) -> bool:
         ):
             return True
 
-        if (
-            (_is_visible_summary_candidate(left) or _is_visible_summary_candidate(right))
-            and _items_overlap(left.get("items"), right.get("items"))
-        ):
-            return True
-
     return False
 
 
@@ -795,13 +843,25 @@ def _merge_order_into(target: dict[str, Any], incoming: dict[str, Any]) -> None:
         "store_name",
         "eta_at",
         "eta_text",
-        "fulfillment_type",
         "dasher_name",
     ):
         if target.get(key) is None and incoming.get(key) is not None:
             target[key] = incoming[key]
 
-    if target.get("total_display") is None and incoming.get("total_display") is not None:
+    target_fulfillment = target.get("fulfillment_type")
+    incoming_fulfillment = incoming.get("fulfillment_type")
+    if incoming_fulfillment and (
+        target_fulfillment is None or str(target_fulfillment).strip().casefold() == "any"
+    ):
+        target["fulfillment_type"] = incoming_fulfillment
+
+    if (
+        incoming.get("total_display") is not None
+        and (
+            target.get("total_display") is None
+            or _display_needs_cleanup(target.get("total_display"))
+        )
+    ):
         target["total_display"] = incoming["total_display"]
     if target.get("total_amount") is None and incoming.get("total_amount") is not None:
         target["total_amount"] = incoming["total_amount"]
@@ -835,13 +895,42 @@ def _merge_order_into(target: dict[str, Any], incoming: dict[str, Any]) -> None:
 
     target_created = target.get("created_at")
     incoming_created = incoming.get("created_at")
-    if target_created is None or (incoming_created is not None and incoming_created < target_created):
+    incoming_is_summary = _is_visible_summary_candidate(incoming)
+    if (
+        target_created is None
+        or (
+            incoming_created is not None
+            and incoming_created < target_created
+            and not (
+                incoming_is_summary
+                and target_created is not None
+                and not _is_midnight_timestamp(target_created)
+            )
+        )
+    ):
         target["created_at"] = incoming_created or target_created
 
     target_updated = target.get("updated_at")
     incoming_updated = incoming.get("updated_at")
-    if target_updated is None or (incoming_updated is not None and incoming_updated > target_updated):
-        target["updated_at"] = incoming_updated or target_updated
+    if (
+        target_updated is None
+        or (
+            incoming_updated is not None
+            and incoming_updated > target_updated
+            and not (
+                incoming_is_summary
+                and target_updated is not None
+                and not _is_midnight_timestamp(target_updated)
+            )
+        )
+    ):
+        if not (
+            incoming_is_summary
+            and incoming_updated is not None
+            and _is_midnight_timestamp(incoming_updated)
+            and target_updated is None
+        ):
+            target["updated_at"] = incoming_updated or target_updated
 
 
 def _merge_candidate_lists(
@@ -890,6 +979,22 @@ def _should_replace_items(target: dict[str, Any], incoming: dict[str, Any]) -> b
     return _items_are_placeholders(target_items) and not _items_are_placeholders(incoming_items)
 
 
+def _display_needs_cleanup(display: str | None) -> bool:
+    """Return whether a display string looks less polished than a replacement."""
+    return isinstance(display, str) and display.strip().startswith("$$")
+
+
+def _is_midnight_timestamp(value: datetime) -> bool:
+    """Return whether a timestamp looks like a date-only midnight placeholder."""
+    local = dt_util.as_local(value)
+    return (
+        local.hour == 0
+        and local.minute == 0
+        and local.second == 0
+        and local.microsecond == 0
+    )
+
+
 def _effective_item_count(order: dict[str, Any]) -> int:
     """Return the best available item count for an order candidate."""
     count = order.get("item_count")
@@ -897,7 +1002,7 @@ def _effective_item_count(order: dict[str, Any]) -> int:
         return count
     items = order.get("items") or []
     if isinstance(items, list):
-        return len(items)
+        return _count_items(items)
     return 0
 
 
@@ -909,35 +1014,6 @@ def _items_are_placeholders(items: list[dict[str, Any]]) -> bool:
         and item["name"].startswith("Item ")
         for item in items
     )
-
-
-def _items_overlap(
-    left_items: list[dict[str, Any]] | None,
-    right_items: list[dict[str, Any]] | None,
-) -> bool:
-    """Return whether two item lists share at least one real item name."""
-    if not left_items or not right_items:
-        return False
-
-    left_names = {
-        item["name"].strip().casefold()
-        for item in left_items
-        if isinstance(item, dict)
-        and isinstance(item.get("name"), str)
-        and item["name"].strip()
-        and not item["name"].startswith("Item ")
-    }
-    right_names = {
-        item["name"].strip().casefold()
-        for item in right_items
-        if isinstance(item, dict)
-        and isinstance(item.get("name"), str)
-        and item["name"].strip()
-        and not item["name"].startswith("Item ")
-    }
-    if not left_names or not right_names:
-        return False
-    return not left_names.isdisjoint(right_names)
 
 
 def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict[str, Any] | None:
@@ -998,6 +1074,17 @@ def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict
     status_candidates = _collect_status_candidates(candidate)
     money_candidates = _collect_money_candidates(candidate)
 
+    if not _looks_like_concrete_order_record(
+        candidate,
+        order_id=order_id,
+        tracking_url=tracking_url,
+        created_at=created_at,
+        updated_at=updated_at,
+        eta_at=eta_at,
+        eta_text=eta_text,
+    ):
+        return None
+
     signal_count = sum(
         bool(value)
         for value in (
@@ -1056,11 +1143,34 @@ def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict
         "help_url": help_url,
         "dasher_name": dasher_name,
         "items": items,
-        "item_count": len(items) if items else None,
+        "item_count": _count_items(items) if items else None,
         "confidence": confidence,
         "status_candidates": status_candidates,
         "money_candidates": money_candidates,
     }
+
+
+def _looks_like_concrete_order_record(
+    candidate: dict[str, Any],
+    *,
+    order_id: Any,
+    tracking_url: str | None,
+    created_at: datetime | None,
+    updated_at: datetime | None,
+    eta_at: datetime | None,
+    eta_text: str | None,
+) -> bool:
+    """Return whether a JSON node looks like a concrete order rather than a page wrapper."""
+    if order_id is not None or tracking_url is not None:
+        return True
+    if created_at is not None or updated_at is not None or eta_at is not None or eta_text:
+        return True
+
+    # Reject large wrapper nodes that only expose order-like data via deep nesting.
+    if any(key in candidate for key in ("platformProps", "children", "initialReactQueryState")):
+        return False
+
+    return False
 
 
 def _extract_status(candidate: dict[str, Any]) -> Any:
@@ -1437,6 +1547,18 @@ def _extract_dasher_name(candidate: dict[str, Any]) -> str | None:
 
 def _extract_items(candidate: dict[str, Any]) -> list[dict[str, Any]]:
     """Extract a normalized item list from a candidate payload."""
+    order_entries = candidate.get("orders")
+    if isinstance(order_entries, list):
+        nested_order_items: list[dict[str, Any]] = []
+        for order_entry in order_entries:
+            if not isinstance(order_entry, dict):
+                continue
+            items = order_entry.get("items")
+            if isinstance(items, list):
+                nested_order_items.extend(_normalize_item_list(items))
+        if nested_order_items:
+            return nested_order_items
+
     for key in (
         "items",
         "order_items",
@@ -1644,6 +1766,18 @@ def _normalize_item_list(value: list[Any]) -> list[dict[str, Any]]:
     return items
 
 
+def _count_items(items: list[dict[str, Any]]) -> int:
+    """Return the total quantity represented by an item list."""
+    total = 0
+    for item in items:
+        quantity = item.get("quantity") if isinstance(item, dict) else None
+        try:
+            total += int(quantity)
+        except (TypeError, ValueError):
+            total += 1
+    return total
+
+
 def _find_best_money_value(candidate: dict[str, Any]) -> tuple[str | None, float | None] | None:
     """Search nested payloads for the most likely order-total money field."""
     best_score = -1
@@ -1804,6 +1938,8 @@ def _normalize_total_display(display: str | None, amount: float | None) -> str |
     """Return a stable human-readable total value."""
     if display is not None:
         stripped = display.strip()
+        while stripped.startswith("$$"):
+            stripped = stripped[1:]
         if stripped and _looks_like_money_string(stripped):
             return stripped
 

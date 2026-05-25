@@ -1,2 +1,6 @@
 __pycache__/
 *.pyc
+cookie.txt
+.cookie.txt
+orders_snapshot.html
+orders_snapshot.json
