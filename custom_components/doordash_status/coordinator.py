@@ -62,6 +62,11 @@ class DoorDashDataUpdateCoordinator(DataUpdateCoordinator[DoorDashSnapshot]):
 
         active_orders = [order for order in orders if _is_active_status(order.get("status"))]
         latest_order = active_orders[0] if active_orders else (orders[0] if orders else None)
+        if latest_order is not None and latest_order.get("status") is None:
+            latest_order = {
+                **latest_order,
+                "status": "In progress" if latest_order.get("eta_at") is not None else "Completed",
+            }
 
         return DoorDashSnapshot(
             orders=orders,

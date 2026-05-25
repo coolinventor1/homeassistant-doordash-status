@@ -271,21 +271,23 @@ def _extract_orders_from_html(html: str, page_url: str) -> list[dict[str, Any]]:
     collector = _ScriptCollector()
     collector.feed(html)
 
-    orders: dict[str, dict[str, Any]] = {}
+    candidates: list[dict[str, Any]] = []
     for payload in _extract_json_payloads(collector.scripts):
-        for order in _find_orders(payload, page_url):
-            orders[order["id"]] = order
+        candidates.extend(_find_orders(payload, page_url))
+
+    orders = _merge_orders(candidates)
 
     extracted = sorted(
-        orders.values(),
+        orders,
         key=_order_sort_key,
         reverse=True,
     )
     _LOGGER.debug(
-        "Extracted %s DoorDash orders from %s using %s script tags",
+        "Extracted %s DoorDash orders from %s using %s script tags (%s raw candidates)",
         len(extracted),
         page_url,
         len(collector.scripts),
+        len(candidates),
     )
     return extracted
 
@@ -463,6 +465,91 @@ def _find_orders(payload: Any, page_url: str) -> list[dict[str, Any]]:
     return found
 
 
+def _merge_orders(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge multiple fragments that appear to describe the same order."""
+    merged: list[dict[str, Any]] = []
+    for candidate in sorted(candidates, key=_order_sort_key, reverse=True):
+        match = next((order for order in merged if _orders_match(order, candidate)), None)
+        if match is None:
+            merged.append(dict(candidate))
+            continue
+        _merge_order_into(match, candidate)
+    return merged
+
+
+def _orders_match(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """Return whether two normalized candidates likely describe the same order."""
+    left_source_id = left.get("source_order_id")
+    right_source_id = right.get("source_order_id")
+    if left_source_id and right_source_id and left_source_id == right_source_id:
+        return True
+
+    left_tracking = left.get("tracking_url")
+    right_tracking = right.get("tracking_url")
+    if left_tracking and right_tracking and left_tracking == right_tracking:
+        return True
+
+    left_store = left.get("store_name")
+    right_store = right.get("store_name")
+    if left_store and right_store and left_store == right_store:
+        left_time = left.get("created_at") or left.get("updated_at")
+        right_time = right.get("created_at") or right.get("updated_at")
+        if left_time and right_time and abs((left_time - right_time).total_seconds()) <= 7200:
+            return True
+
+        left_total = left.get("total_amount")
+        right_total = right.get("total_amount")
+        if (
+            left_total is not None
+            and right_total is not None
+            and abs(left_total - right_total) < 0.01
+        ):
+            return True
+
+    return False
+
+
+def _merge_order_into(target: dict[str, Any], incoming: dict[str, Any]) -> None:
+    """Merge a normalized order fragment into the target order."""
+    for key in (
+        "source_order_id",
+        "tracking_url",
+        "help_url",
+        "store_name",
+        "eta_at",
+        "eta_text",
+        "fulfillment_type",
+        "dasher_name",
+    ):
+        if target.get(key) is None and incoming.get(key) is not None:
+            target[key] = incoming[key]
+
+    if target.get("total_display") is None and incoming.get("total_display") is not None:
+        target["total_display"] = incoming["total_display"]
+    if target.get("total_amount") is None and incoming.get("total_amount") is not None:
+        target["total_amount"] = incoming["total_amount"]
+
+    if not target.get("items") and incoming.get("items"):
+        target["items"] = incoming["items"]
+
+    existing_status = target.get("status")
+    incoming_status = incoming.get("status")
+    if incoming_status and (existing_status is None or existing_status in {"Completed", "In progress"}):
+        target["status"] = incoming_status
+
+    target["confidence"] = max(target.get("confidence", 0), incoming.get("confidence", 0))
+
+    target_created = target.get("created_at")
+    incoming_created = incoming.get("created_at")
+    if target_created is None or (incoming_created is not None and incoming_created < target_created):
+        target["created_at"] = incoming_created or target_created
+
+    target_updated = target.get("updated_at")
+    incoming_updated = incoming.get("updated_at")
+    if target_updated is None or (incoming_updated is not None and incoming_updated > target_updated):
+        target["updated_at"] = incoming_updated or target_updated
+
+
 def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict[str, Any] | None:
     """Convert a JSON object into a normalized order summary when it looks like one."""
     order_id = _first_value(
@@ -563,6 +650,7 @@ def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict
 
     return {
         "id": str(synthetic_id),
+        "source_order_id": str(order_id) if order_id is not None else None,
         "status": status,
         "store_name": store_name,
         "eta_at": eta_at,
