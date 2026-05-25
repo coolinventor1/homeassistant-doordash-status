@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 import json
 import logging
@@ -11,10 +11,69 @@ import re
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 
-import aiohttp
-from homeassistant.util import dt as dt_util
+try:
+    import aiohttp
+except ModuleNotFoundError:  # pragma: no cover - local debug harness can run without aiohttp
+    aiohttp = None
 
-from .const import DEFAULT_REQUEST_TIMEOUT
+try:
+    from homeassistant.util import dt as dt_util
+except ModuleNotFoundError:  # pragma: no cover - local debug harness fallback
+    class _FallbackDateTimeUtil:
+        """Small subset of Home Assistant datetime helpers for local debugging."""
+
+        UTC = timezone.utc
+
+        @staticmethod
+        def now() -> datetime:
+            """Return the current local time."""
+            return datetime.now().astimezone()
+
+        @staticmethod
+        def utcnow() -> datetime:
+            """Return the current UTC time."""
+            return datetime.now(timezone.utc)
+
+        @staticmethod
+        def parse_datetime(value: str) -> datetime | None:
+            """Parse an ISO-like datetime string."""
+            normalized = value.strip()
+            if not normalized:
+                return None
+            if normalized.endswith("Z"):
+                normalized = f"{normalized[:-1]}+00:00"
+            try:
+                parsed = datetime.fromisoformat(normalized)
+            except ValueError:
+                return None
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=timezone.utc)
+            return parsed
+
+        @staticmethod
+        def as_local(value: datetime) -> datetime:
+            """Convert a datetime into the current local timezone."""
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            return value.astimezone()
+
+        @classmethod
+        def start_of_local_day(cls, value: datetime) -> datetime:
+            """Return local midnight for the supplied datetime."""
+            local = cls.as_local(value)
+            return local.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        @staticmethod
+        def utc_from_timestamp(value: float) -> datetime:
+            """Convert a POSIX timestamp into UTC."""
+            return datetime.fromtimestamp(value, tz=timezone.utc)
+
+    dt_util = _FallbackDateTimeUtil()
+
+try:
+    from .const import DEFAULT_REQUEST_TIMEOUT
+except ImportError:  # pragma: no cover - direct file import for local debugging
+    DEFAULT_REQUEST_TIMEOUT = 30
 
 _LOGGER = logging.getLogger(__name__)
 _US_STATE_CODES = {
@@ -123,6 +182,11 @@ class DoorDashApiClient:
         tracking_url: str | None = None,
     ) -> None:
         """Store client dependencies."""
+        if aiohttp is None:
+            raise DoorDashConnectionError(
+                "aiohttp is required to use DoorDashApiClient directly. "
+                "Use the local debug script for parser-only debugging."
+            )
         self._session = session
         self._base_url = base_url.rstrip("/")
         self._tracking_url = tracking_url
@@ -338,6 +402,11 @@ def _extract_orders_from_html(html: str, page_url: str) -> list[dict[str, Any]]:
         len(candidates),
     )
     return extracted
+
+
+def extract_orders_from_html(html: str, page_url: str) -> list[dict[str, Any]]:
+    """Public wrapper used by the local debug harness."""
+    return _extract_orders_from_html(html, page_url)
 
 
 def _extract_json_payloads(scripts: Iterable[dict[str, Any]]) -> list[Any]:

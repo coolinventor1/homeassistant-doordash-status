@@ -64,6 +64,24 @@ This is the best setup when you want Home Assistant to automatically watch the l
 
 As long as the DoorDash session stays valid, Home Assistant should continue tracking new and active orders without needing a new tracking URL each time.
 
+## Local debugging
+
+You can debug the parser locally without reinstalling the Home Assistant integration on every change.
+
+Parse a saved DoorDash orders HTML file:
+
+```powershell
+python .\scripts\doordash_local_debug.py --html .\orders_snapshot.html
+```
+
+Fetch your live DoorDash orders page with a browser cookie and save the snapshot:
+
+```powershell
+python .\scripts\doordash_local_debug.py --cookie-file .\cookie.txt --save-html .\orders_snapshot.html
+```
+
+The script prints a compact summary plus the normalized order JSON using the same parser logic as the integration.
+
 ## Notes
 
 - Browser-session mode is unofficial and may stop working if DoorDash changes its website.
