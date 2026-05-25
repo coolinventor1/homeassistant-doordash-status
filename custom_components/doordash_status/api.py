@@ -78,6 +78,25 @@ _NEXT_PUSH_RE = re.compile(
     r"self\.__next_f\.push\((?P<payload>\[.*\])\)\s*;?\s*$",
     re.DOTALL,
 )
+_STATUS_KEYS = (
+    "order_status",
+    "orderStatus",
+    "status",
+    "delivery_status",
+    "deliveryStatus",
+    "fulfillment_status",
+    "fulfillmentStatus",
+    "status_text",
+    "statusText",
+    "status_description",
+    "statusDescription",
+    "progress_label",
+    "progressLabel",
+    "current_status",
+    "currentStatus",
+    "phase",
+    "state",
+)
 
 
 class DoorDashApiError(Exception):
@@ -532,6 +551,15 @@ def _merge_order_into(target: dict[str, Any], incoming: dict[str, Any]) -> None:
     if not target.get("items") and incoming.get("items"):
         target["items"] = incoming["items"]
 
+    target["status_candidates"] = _merge_candidate_lists(
+        target.get("status_candidates", []),
+        incoming.get("status_candidates", []),
+    )
+    target["money_candidates"] = _merge_candidate_lists(
+        target.get("money_candidates", []),
+        incoming.get("money_candidates", []),
+    )
+
     existing_status = target.get("status")
     incoming_status = incoming.get("status")
     if incoming_status and (existing_status is None or existing_status in {"Completed", "In progress"}):
@@ -548,6 +576,22 @@ def _merge_order_into(target: dict[str, Any], incoming: dict[str, Any]) -> None:
     incoming_updated = incoming.get("updated_at")
     if target_updated is None or (incoming_updated is not None and incoming_updated > target_updated):
         target["updated_at"] = incoming_updated or target_updated
+
+
+def _merge_candidate_lists(
+    left: list[dict[str, Any]],
+    right: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge diagnostic candidate lists while preserving order and uniqueness."""
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for candidate in [*left, *right]:
+        marker = json.dumps(candidate, sort_keys=True, default=str)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        merged.append(candidate)
+    return merged[:10]
 
 
 def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict[str, Any] | None:
@@ -605,6 +649,8 @@ def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict
     )
     dasher_name = _extract_dasher_name(candidate)
     items = _extract_items(candidate)
+    status_candidates = _collect_status_candidates(candidate)
+    money_candidates = _collect_money_candidates(candidate)
 
     signal_count = sum(
         bool(value)
@@ -665,30 +711,14 @@ def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict
         "dasher_name": dasher_name,
         "items": items,
         "confidence": confidence,
+        "status_candidates": status_candidates,
+        "money_candidates": money_candidates,
     }
 
 
 def _extract_status(candidate: dict[str, Any]) -> Any:
     """Extract a status-like field."""
-    for key in (
-        "order_status",
-        "orderStatus",
-        "status",
-        "delivery_status",
-        "deliveryStatus",
-        "fulfillment_status",
-        "fulfillmentStatus",
-        "status_text",
-        "statusText",
-        "status_description",
-        "statusDescription",
-        "progress_label",
-        "progressLabel",
-        "current_status",
-        "currentStatus",
-        "phase",
-        "state",
-    ):
+    for key in _STATUS_KEYS:
         if key not in candidate:
             continue
         value = candidate[key]
@@ -696,26 +726,7 @@ def _extract_status(candidate: dict[str, Any]) -> Any:
             return _first_value(value, "label", "text", "display_string", "value")
         return value
 
-    nested = _find_nested_value(
-        candidate,
-        "order_status",
-        "orderStatus",
-        "status",
-        "delivery_status",
-        "deliveryStatus",
-        "fulfillment_status",
-        "fulfillmentStatus",
-        "status_text",
-        "statusText",
-        "status_description",
-        "statusDescription",
-        "progress_label",
-        "progressLabel",
-        "current_status",
-        "currentStatus",
-        "phase",
-        "state",
-    )
+    nested = _find_nested_value(candidate, *_STATUS_KEYS)
     if isinstance(nested, dict):
         return _first_value(
             nested,
@@ -748,6 +759,56 @@ def _normalize_status(status: str | None) -> str | None:
         return None
 
     return normalized
+
+
+def _collect_status_candidates(candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    """Collect status-like fields for debugging the latest order mapping."""
+    collected: list[dict[str, Any]] = []
+    queue: list[Any] = [candidate]
+    seen_nodes: set[int] = set()
+    seen_values: set[str] = set()
+
+    while queue:
+        current = queue.pop(0)
+        if not isinstance(current, dict):
+            continue
+
+        current_id = id(current)
+        if current_id in seen_nodes:
+            continue
+        seen_nodes.add(current_id)
+
+        for key, value in current.items():
+            if key in _STATUS_KEYS:
+                if isinstance(value, dict):
+                    normalized = _normalize_status(
+                        _stringify(
+                            _first_value(
+                                value,
+                                "label",
+                                "text",
+                                "display_string",
+                                "displayString",
+                                "description",
+                                "value",
+                            )
+                        )
+                    )
+                else:
+                    normalized = _normalize_status(_stringify(value))
+
+                if normalized is not None:
+                    marker = f"{key}:{normalized}"
+                    if marker not in seen_values:
+                        seen_values.add(marker)
+                        collected.append({"key": key, "value": normalized})
+
+            if isinstance(value, dict):
+                queue.append(value)
+            elif isinstance(value, list):
+                queue.extend(item for item in value if isinstance(item, dict))
+
+    return collected[:10]
 
 
 def _derive_status(
@@ -1271,6 +1332,57 @@ def _find_best_money_value(candidate: dict[str, Any]) -> tuple[str | None, float
             queue.extend(item for item in current if isinstance(item, (dict, list)))
 
     return best_value
+
+
+def _collect_money_candidates(candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    """Collect total-like money fields for debugging the latest order mapping."""
+    collected: list[dict[str, Any]] = []
+    queue: list[Any] = [candidate]
+    seen_nodes: set[int] = set()
+    seen_values: set[str] = set()
+
+    while queue:
+        current = queue.pop(0)
+        current_id = id(current)
+        if current_id in seen_nodes:
+            continue
+        seen_nodes.add(current_id)
+
+        if isinstance(current, dict):
+            for key, value in current.items():
+                if isinstance(value, (dict, list)):
+                    queue.append(value)
+
+                score = _score_money_candidate(key, value)
+                if score < 0:
+                    continue
+
+                display, amount = _normalize_money(value)
+                if display is None and amount is None:
+                    continue
+
+                candidate_info = {
+                    "key": key,
+                    "label": _extract_money_label(value) or None,
+                    "display": display,
+                    "amount": amount,
+                    "score": score,
+                }
+                marker = json.dumps(candidate_info, sort_keys=True, default=str)
+                if marker in seen_values:
+                    continue
+                seen_values.add(marker)
+                collected.append(candidate_info)
+            continue
+
+        if isinstance(current, list):
+            queue.extend(item for item in current if isinstance(item, (dict, list)))
+
+    collected.sort(
+        key=lambda item: (item.get("score", 0), item.get("amount") is not None, item.get("display") is not None),
+        reverse=True,
+    )
+    return collected[:10]
 
 
 def _score_money_candidate(key: str, value: Any) -> int:

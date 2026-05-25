@@ -46,6 +46,9 @@ def _serialize_order(order: dict[str, Any] | None) -> dict[str, Any] | None:
         "dasher_name": order.get("dasher_name"),
         "items": order.get("items"),
         "confidence": order.get("confidence"),
+        "source_order_id": order.get("source_order_id"),
+        "status_candidates": order.get("status_candidates"),
+        "money_candidates": order.get("money_candidates"),
     }
 
 
