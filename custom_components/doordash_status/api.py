@@ -708,6 +708,12 @@ def _orders_match(left: dict[str, Any], right: dict[str, Any]) -> bool:
         ):
             return True
 
+        if (
+            (_is_visible_summary_candidate(left) or _is_visible_summary_candidate(right))
+            and _items_overlap(left.get("items"), right.get("items"))
+        ):
+            return True
+
     return False
 
 
@@ -834,6 +840,35 @@ def _items_are_placeholders(items: list[dict[str, Any]]) -> bool:
         and item["name"].startswith("Item ")
         for item in items
     )
+
+
+def _items_overlap(
+    left_items: list[dict[str, Any]] | None,
+    right_items: list[dict[str, Any]] | None,
+) -> bool:
+    """Return whether two item lists share at least one real item name."""
+    if not left_items or not right_items:
+        return False
+
+    left_names = {
+        item["name"].strip().casefold()
+        for item in left_items
+        if isinstance(item, dict)
+        and isinstance(item.get("name"), str)
+        and item["name"].strip()
+        and not item["name"].startswith("Item ")
+    }
+    right_names = {
+        item["name"].strip().casefold()
+        for item in right_items
+        if isinstance(item, dict)
+        and isinstance(item.get("name"), str)
+        and item["name"].strip()
+        and not item["name"].startswith("Item ")
+    }
+    if not left_names or not right_names:
+        return False
+    return not left_names.isdisjoint(right_names)
 
 
 def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict[str, Any] | None:
@@ -1825,15 +1860,16 @@ def _normalize_url(value: Any, page_url: str) -> str | None:
     return urljoin(page_url, value.strip())
 
 
-def _order_sort_key(order: dict[str, Any]) -> tuple[int, datetime, str]:
+def _order_sort_key(order: dict[str, Any]) -> tuple[int, datetime, int, str]:
     """Return a stable sort key for order recency."""
-    timestamp = (
-        order.get("updated_at")
-        or order.get("eta_at")
-        or order.get("created_at")
-        or dt_util.utcnow()
+    timestamp = order.get("updated_at") or order.get("eta_at") or order.get("created_at")
+    fallback_timestamp = datetime(1970, 1, 1, tzinfo=dt_util.UTC)
+    return (
+        1 if timestamp is not None else 0,
+        timestamp or fallback_timestamp,
+        order.get("confidence", 0),
+        order["id"],
     )
-    return order.get("confidence", 0), timestamp, order["id"]
 
 
 def _first_value(mapping: dict[str, Any], *keys: str) -> Any:
