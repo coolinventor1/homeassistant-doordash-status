@@ -19,11 +19,12 @@ from .coordinator import DoorDashDataUpdateCoordinator
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up DoorDash Status from a config entry."""
+    options = entry.options
     client = DoorDashApiClient(
         session=async_get_clientsession(hass),
-        base_url=entry.data.get(CONF_BASE_URL, "https://www.doordash.com"),
-        cookie_header=entry.data.get(CONF_BROWSER_COOKIE),
-        tracking_url=entry.data.get(CONF_TRACKING_URL),
+        base_url=options.get(CONF_BASE_URL, entry.data.get(CONF_BASE_URL, "https://www.doordash.com")),
+        cookie_header=options.get(CONF_BROWSER_COOKIE, entry.data.get(CONF_BROWSER_COOKIE)),
+        tracking_url=options.get(CONF_TRACKING_URL, entry.data.get(CONF_TRACKING_URL)),
     )
 
     coordinator = DoorDashDataUpdateCoordinator(hass, entry, client)

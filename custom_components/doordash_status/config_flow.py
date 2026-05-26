@@ -169,26 +169,114 @@ class DoorDashStatusOptionsFlow(config_entries.OptionsFlow):
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Handle the options form."""
-        if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
-
         options = self._config_entry.options
         data = self._config_entry.data
+        errors: dict[str, str] = {}
+        current_tracking_url = options.get(CONF_TRACKING_URL, data.get(CONF_TRACKING_URL))
+        current_base_url = options.get(CONF_BASE_URL, data.get(CONF_BASE_URL, DEFAULT_BASE_URL))
+        current_browser_cookie = options.get(
+            CONF_BROWSER_COOKIE,
+            data.get(CONF_BROWSER_COOKIE, ""),
+        )
+        uses_tracking_url = current_tracking_url is not None
+
+        if user_input is not None:
+            cleaned: dict[str, Any] = {
+                CONF_SCAN_INTERVAL_MINUTES: int(user_input[CONF_SCAN_INTERVAL_MINUTES]),
+            }
+
+            if uses_tracking_url:
+                try:
+                    tracking_url = _normalize_url(user_input[CONF_TRACKING_URL])
+                    if tracking_url != current_tracking_url:
+                        await _async_validate_tracking_url(self.hass, tracking_url)
+                except InvalidDoorDashUrl:
+                    errors[CONF_TRACKING_URL] = "invalid_url"
+                except DoorDashConnectionError:
+                    errors["base"] = "cannot_connect"
+                except DoorDashApiError:
+                    errors["base"] = "cannot_use_tracking_url"
+                else:
+                    cleaned[CONF_TRACKING_URL] = tracking_url
+            else:
+                try:
+                    base_url = _normalize_url(user_input[CONF_BASE_URL], path_ok=True)
+                    browser_cookie_input = _normalize_cookie_header(
+                        user_input.get(CONF_BROWSER_COOKIE, "")
+                    )
+                    browser_cookie = browser_cookie_input or current_browser_cookie
+                    if not browser_cookie:
+                        errors[CONF_BROWSER_COOKIE] = "required"
+                    elif (
+                        browser_cookie != current_browser_cookie
+                        or base_url != current_base_url
+                    ):
+                        await _async_validate_browser_session(
+                            self.hass,
+                            base_url,
+                            browser_cookie,
+                        )
+                except InvalidDoorDashUrl:
+                    errors[CONF_BASE_URL] = "invalid_url"
+                except DoorDashConnectionError:
+                    errors["base"] = "cannot_connect"
+                except DoorDashAuthError:
+                    errors["base"] = "invalid_auth"
+                except DoorDashApiError:
+                    errors["base"] = "unknown"
+                else:
+                    cleaned[CONF_BASE_URL] = base_url
+                    cleaned[CONF_BROWSER_COOKIE] = browser_cookie
+
+            if not errors:
+                return self.async_create_entry(title="", data=cleaned)
 
         return self.async_show_form(
             step_id="init",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(
-                        CONF_SCAN_INTERVAL_MINUTES,
-                        default=options.get(
-                            CONF_SCAN_INTERVAL_MINUTES,
-                            data.get(CONF_SCAN_INTERVAL_MINUTES, DEFAULT_SCAN_INTERVAL_MINUTES),
-                        ),
-                    ): vol.All(vol.Coerce(int), vol.Range(min=2, max=30)),
-                }
-            ),
+            data_schema=vol.Schema(_build_options_schema(
+                uses_tracking_url=uses_tracking_url,
+                current_tracking_url=current_tracking_url,
+                current_base_url=current_base_url,
+                current_scan_interval=options.get(
+                    CONF_SCAN_INTERVAL_MINUTES,
+                    data.get(CONF_SCAN_INTERVAL_MINUTES, DEFAULT_SCAN_INTERVAL_MINUTES),
+                ),
+            )),
+            errors=errors if user_input is not None else None,
         )
+
+
+def _build_options_schema(
+    *,
+    uses_tracking_url: bool,
+    current_tracking_url: str | None,
+    current_base_url: str,
+    current_scan_interval: int,
+) -> dict[Any, Any]:
+    """Build the options schema for the current DoorDash auth mode."""
+    schema: dict[Any, Any] = {
+        vol.Required(
+            CONF_SCAN_INTERVAL_MINUTES,
+            default=current_scan_interval,
+        ): vol.All(vol.Coerce(int), vol.Range(min=2, max=30)),
+    }
+
+    if uses_tracking_url:
+        schema[vol.Required(
+            CONF_TRACKING_URL,
+            default=current_tracking_url or "https://",
+        )] = str
+        return schema
+
+    schema[vol.Required(
+        CONF_BASE_URL,
+        default=current_base_url,
+    )] = str
+    schema[vol.Optional(
+        CONF_BROWSER_COOKIE,
+        default="",
+    )] = str
+    return schema
 
 
 async def _async_validate_tracking_url(hass, tracking_url: str) -> dict[str, Any]:

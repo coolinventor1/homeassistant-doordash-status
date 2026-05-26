@@ -64,6 +64,8 @@ This is the best setup when you want Home Assistant to automatically watch the l
 
 As long as the DoorDash session stays valid, Home Assistant should continue tracking new and active orders without needing a new tracking URL each time.
 
+If DoorDash rotates your session later, open the integration `Options` in Home Assistant and paste a fresh browser cookie there. Leave the cookie field blank if you only want to change the scan interval and keep the current session.
+
 ## Local debugging
 
 You can debug the parser locally without reinstalling the Home Assistant integration on every change.
