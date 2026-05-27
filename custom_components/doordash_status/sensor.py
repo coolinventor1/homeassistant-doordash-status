@@ -96,6 +96,44 @@ def _item_count_value(order: dict[str, Any] | None) -> int:
     return 0
 
 
+def _format_item_label(item: dict[str, Any]) -> str | None:
+    """Return a compact human-readable label for a single order item."""
+    name = item.get("name") if isinstance(item, dict) else None
+    if not isinstance(name, str) or not name.strip():
+        return None
+
+    quantity = item.get("quantity") if isinstance(item, dict) else None
+    try:
+        quantity_int = int(quantity)
+    except (TypeError, ValueError):
+        quantity_int = 1
+
+    if quantity_int > 1:
+        return f"{quantity_int}x {name.strip()}"
+    return name.strip()
+
+
+def _format_items_value(order: dict[str, Any] | None) -> str | None:
+    """Return a stable state value for the latest items sensor."""
+    if order is None:
+        return None
+
+    items = order.get("items") or []
+    if not isinstance(items, list) or not items:
+        return None
+
+    labels = [label for label in (_format_item_label(item) for item in items) if label]
+    if not labels:
+        return None
+
+    joined = ", ".join(labels)
+    if len(joined) <= 250:
+        return joined
+
+    item_count = _item_count_value(order)
+    return f"{item_count} items" if item_count else f"{len(labels)} items"
+
+
 SENSOR_DESCRIPTIONS: tuple[DoorDashSensorDescription, ...] = (
     DoorDashSensorDescription(
         key="active_orders",
@@ -163,6 +201,24 @@ SENSOR_DESCRIPTIONS: tuple[DoorDashSensorDescription, ...] = (
         value_fn=lambda data: _item_count_value(data.latest_order),
         attrs_fn=lambda data: {
             "items": data.latest_order.get("items") if data.latest_order else [],
+            "latest_order": _serialize_order(data.latest_order),
+        },
+    ),
+    DoorDashSensorDescription(
+        key="latest_order_items",
+        name="Latest order items",
+        icon="mdi:food-outline",
+        value_fn=lambda data: _format_items_value(data.latest_order),
+        attrs_fn=lambda data: {
+            "items": data.latest_order.get("items") if data.latest_order else [],
+            "item_labels": [
+                label
+                for label in (
+                    _format_item_label(item)
+                    for item in (data.latest_order.get("items") if data.latest_order else [])
+                )
+                if label
+            ],
             "latest_order": _serialize_order(data.latest_order),
         },
     ),
