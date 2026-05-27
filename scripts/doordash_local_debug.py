@@ -191,6 +191,7 @@ def _print_summary(orders: list[dict[str, Any]], *, source_url: str, limit: int)
     for index, order in enumerate(orders[:limit]):
         print(f"[{index}] {order.get('store_name') or 'Unknown store'}")
         print(f"  status: {order.get('status') or 'Unknown'}")
+        print(f"  raw_status: {order.get('raw_status') or 'Unknown'}")
         print(f"  total: {order.get('total_display') or order.get('total_amount') or 'Unknown'}")
         print(f"  item_count: {order.get('item_count') or 0}")
         print(f"  fulfillment_type: {order.get('fulfillment_type') or 'Unknown'}")

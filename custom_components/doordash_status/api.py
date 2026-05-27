@@ -156,6 +156,129 @@ _STATUS_KEYS = (
     "phase",
     "state",
 )
+_STATUS_NORMALIZATION_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "Cancelled",
+        (
+            "cancel",
+            "unable to complete",
+            "could not complete",
+            "couldn't complete",
+            "failed",
+            "refund",
+        ),
+    ),
+    (
+        "Issue",
+        (
+            "delay",
+            "problem",
+            "issue",
+            "support",
+            "unavailable",
+            "substitute",
+        ),
+    ),
+    (
+        "Delivered",
+        (
+            "deliver",
+            "complete",
+            "completed",
+            "dropped off",
+            "success",
+            "fulfilled",
+            "finished",
+        ),
+    ),
+    (
+        "Arriving soon",
+        (
+            "arriving soon",
+            "almost there",
+            "nearby",
+            "close by",
+            "minutes away",
+        ),
+    ),
+    (
+        "On the way",
+        (
+            "on the way",
+            "out for delivery",
+            "picked up",
+            "en route",
+            "heading to you",
+            "heading your way",
+        ),
+    ),
+    (
+        "Picking up",
+        (
+            "picking up",
+            "at store",
+            "arrived at store",
+            "waiting at store",
+            "heading to store",
+            "ready for pickup",
+        ),
+    ),
+    (
+        "Dasher assigned",
+        (
+            "dasher assigned",
+            "driver assigned",
+            "courier assigned",
+            "shopper assigned",
+            "your dasher",
+            "your driver",
+        ),
+    ),
+    (
+        "Preparing",
+        (
+            "prepar",
+            "being made",
+            "making your order",
+            "cooking",
+            "shopping",
+            "gathering items",
+            "working on your order",
+        ),
+    ),
+    (
+        "Confirmed",
+        (
+            "confirm",
+            "accepted",
+            "merchant accepted",
+            "store accepted",
+            "scheduled",
+        ),
+    ),
+    (
+        "Placed",
+        (
+            "placed",
+            "order received",
+            "received your order",
+            "we got your order",
+            "submitted",
+            "sending to merchant",
+        ),
+    ),
+)
+_ACTIVE_ORDER_STATUSES = {
+    "Placed",
+    "Confirmed",
+    "Preparing",
+    "Dasher assigned",
+    "Picking up",
+    "On the way",
+    "Arriving soon",
+}
+_TERMINAL_ORDER_STATUSES = {"Delivered", "Cancelled", "Issue"}
+_FALLBACK_ORDER_STATUSES = {"Unknown", "Delivered"}
 
 
 class DoorDashApiError(Exception):
@@ -518,7 +641,8 @@ def _extract_order_summaries_from_text(html: str, page_url: str) -> list[dict[st
             {
                 "id": order_id,
                 "source_order_id": None,
-                "status": "Completed",
+                "raw_status": None,
+                "status": "Delivered",
                 "store_name": store_name,
                 "eta_at": None,
                 "eta_text": None,
@@ -533,7 +657,7 @@ def _extract_order_summaries_from_text(html: str, page_url: str) -> list[dict[st
                 "items": items,
                 "item_count": meta["item_count"],
                 "confidence": 8,
-                "status_candidates": [{"key": "visible_order_history", "value": "Completed"}],
+                "status_candidates": [{"key": "visible_order_history", "value": "Delivered"}],
                 "money_candidates": [
                     {
                         "key": "visible_order_history",
@@ -844,6 +968,7 @@ def _merge_order_into(target: dict[str, Any], incoming: dict[str, Any]) -> None:
         "eta_at",
         "eta_text",
         "dasher_name",
+        "raw_status",
     ):
         if target.get(key) is None and incoming.get(key) is not None:
             target[key] = incoming[key]
@@ -888,8 +1013,10 @@ def _merge_order_into(target: dict[str, Any], incoming: dict[str, Any]) -> None:
 
     existing_status = target.get("status")
     incoming_status = incoming.get("status")
-    if incoming_status and (existing_status is None or existing_status in {"Completed", "In progress"}):
-        target["status"] = incoming_status
+    if _should_replace_status(target, incoming):
+        target["status"] = incoming_status or existing_status
+        if incoming.get("raw_status") is not None:
+            target["raw_status"] = incoming["raw_status"]
 
     target["confidence"] = max(target.get("confidence", 0), incoming.get("confidence", 0))
 
@@ -947,6 +1074,37 @@ def _merge_candidate_lists(
         seen.add(marker)
         merged.append(candidate)
     return merged[:10]
+
+
+def _should_replace_status(target: dict[str, Any], incoming: dict[str, Any]) -> bool:
+    """Return whether an incoming status is more trustworthy than the current one."""
+    incoming_status = incoming.get("status")
+    if incoming_status is None:
+        return False
+
+    existing_status = target.get("status")
+    if existing_status is None:
+        return True
+
+    existing_raw = _normalize_status(_stringify(target.get("raw_status")))
+    incoming_raw = _normalize_status(_stringify(incoming.get("raw_status")))
+
+    if existing_status == incoming_status and existing_raw is None and incoming_raw is not None:
+        return True
+
+    if existing_status == "Unknown" and incoming_status != "Unknown":
+        return True
+
+    if (
+        existing_status in _FALLBACK_ORDER_STATUSES
+        and incoming_status not in _FALLBACK_ORDER_STATUSES
+    ):
+        return True
+
+    if existing_raw is None and incoming_raw is not None:
+        return True
+
+    return False
 
 
 def _is_visible_summary_candidate(order: dict[str, Any]) -> bool:
@@ -1038,8 +1196,7 @@ def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict
         page_url,
     )
     help_url = _normalize_url(_first_value(candidate, "help_url", "helpUrl"), page_url)
-    status = _stringify(_extract_status(candidate))
-    status = _normalize_status(status)
+    raw_status = _normalize_status(_stringify(_extract_status(candidate)))
     store_name = _extract_store_name(candidate)
     eta_at, eta_text = _extract_eta(candidate)
     updated_at = _parse_any_datetime(
@@ -1088,7 +1245,7 @@ def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict
     signal_count = sum(
         bool(value)
         for value in (
-            status,
+            raw_status,
             tracking_url,
             store_name,
             eta_at or eta_text,
@@ -1106,7 +1263,7 @@ def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict
         order_id=order_id,
         tracking_url=tracking_url,
         store_name=store_name,
-        status=status,
+        status=raw_status,
         created_at=created_at,
         updated_at=updated_at,
         total_display=total_display,
@@ -1117,10 +1274,12 @@ def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict
         return None
 
     status = _derive_status(
-        status=status,
+        raw_status=raw_status,
         created_at=created_at,
         updated_at=updated_at,
         eta_at=eta_at,
+        eta_text=eta_text,
+        dasher_name=dasher_name,
     )
 
     synthetic_id = order_id or tracking_url or help_url or f"{store_name}:{status}:{eta_text}"
@@ -1130,6 +1289,7 @@ def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict
     return {
         "id": str(synthetic_id),
         "source_order_id": str(order_id) if order_id is not None else None,
+        "raw_status": raw_status,
         "status": status,
         "store_name": store_name,
         "eta_at": eta_at,
@@ -1218,6 +1378,20 @@ def _normalize_status(status: str | None) -> str | None:
     return normalized
 
 
+def _normalize_status_label(raw_status: str | None) -> str | None:
+    """Map a raw DoorDash status string onto a stable user-facing lifecycle label."""
+    cleaned = _normalize_status(raw_status)
+    if cleaned is None:
+        return None
+
+    lowered = cleaned.casefold()
+    for normalized, keywords in _STATUS_NORMALIZATION_RULES:
+        if any(keyword in lowered for keyword in keywords):
+            return normalized
+
+    return "Unknown"
+
+
 def _collect_status_candidates(candidate: dict[str, Any]) -> list[dict[str, Any]]:
     """Collect status-like fields for debugging the latest order mapping."""
     collected: list[dict[str, Any]] = []
@@ -1270,28 +1444,47 @@ def _collect_status_candidates(candidate: dict[str, Any]) -> list[dict[str, Any]
 
 def _derive_status(
     *,
-    status: str | None,
+    raw_status: str | None,
     created_at: datetime | None,
     updated_at: datetime | None,
     eta_at: datetime | None,
+    eta_text: str | None,
+    dasher_name: str | None,
 ) -> str | None:
     """Provide a conservative fallback status when DoorDash omits one."""
-    if status is not None:
-        return status
+    normalized = _normalize_status_label(raw_status)
+    if normalized not in (None, "Unknown"):
+        return normalized
 
     now = dt_util.utcnow()
     reference_time = updated_at or created_at
 
+    lowered_eta_text = eta_text.casefold() if eta_text else ""
+    if any(token in lowered_eta_text for token in ("arriving", "nearby", "away", "almost")):
+        return "Arriving soon"
+
     if eta_at is not None and eta_at >= now:
-        return "In progress"
+        if dasher_name:
+            if eta_at - now <= timedelta(minutes=10):
+                return "Arriving soon"
+            return "On the way"
+        return "Preparing"
+
+    if dasher_name:
+        return "Dasher assigned"
 
     if reference_time is None:
-        return None
+        return normalized or "Unknown"
 
-    if now - reference_time >= timedelta(minutes=30):
-        return "Completed"
+    if now - reference_time >= timedelta(hours=3):
+        return "Delivered"
 
-    return None
+    return normalized or "Unknown"
+
+
+def is_active_order_status(status: str | None) -> bool:
+    """Return whether a normalized DoorDash status is still active."""
+    return status in _ACTIVE_ORDER_STATUSES
 
 
 def _score_order_candidate(

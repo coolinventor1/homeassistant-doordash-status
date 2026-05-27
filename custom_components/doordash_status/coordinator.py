@@ -11,7 +11,12 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import DoorDashApiClient, DoorDashApiError, DoorDashAuthError
+from .api import (
+    DoorDashApiClient,
+    DoorDashApiError,
+    DoorDashAuthError,
+    is_active_order_status,
+)
 from .const import CONF_SCAN_INTERVAL_MINUTES, DEFAULT_SCAN_INTERVAL_MINUTES, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -60,61 +65,11 @@ class DoorDashDataUpdateCoordinator(DataUpdateCoordinator[DoorDashSnapshot]):
         except DoorDashApiError as err:
             raise UpdateFailed(str(err)) from err
 
-        active_orders = [order for order in orders if _is_active_status(order.get("status"))]
+        active_orders = [order for order in orders if is_active_order_status(order.get("status"))]
         latest_order = active_orders[0] if active_orders else (orders[0] if orders else None)
-        if latest_order is not None and latest_order.get("status") is None:
-            latest_order = {
-                **latest_order,
-                "status": "In progress" if latest_order.get("eta_at") is not None else "Completed",
-            }
 
         return DoorDashSnapshot(
             orders=orders,
             active_orders=active_orders,
             latest_order=latest_order,
         )
-
-
-def _is_active_status(status: str | None) -> bool:
-    """Return whether a DoorDash status looks active rather than completed."""
-    if status is None:
-        return False
-
-    lowered = status.lower()
-    if any(
-        keyword in lowered
-        for keyword in (
-            "delivered",
-            "complete",
-            "completed",
-            "cancelled",
-            "canceled",
-            "failed",
-            "refunded",
-        )
-    ):
-        return False
-
-    return any(
-        keyword in lowered
-        for keyword in (
-            "prepar",
-            "on the way",
-            "arriving",
-            "picked up",
-            "heading",
-            "dasher",
-            "delivery",
-            "driver",
-            "shopping",
-            "pickup",
-            "in progress",
-            "accepted",
-            "confirmed",
-            "placing",
-            "placed",
-            "order received",
-            "being made",
-            "ready soon",
-        )
-    )

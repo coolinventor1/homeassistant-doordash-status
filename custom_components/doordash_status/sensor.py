@@ -32,6 +32,7 @@ def _serialize_order(order: dict[str, Any] | None) -> dict[str, Any] | None:
 
     return {
         "id": order.get("id"),
+        "raw_status": order.get("raw_status"),
         "status": order.get("status"),
         "store_name": order.get("store_name"),
         "eta_at": order["eta_at"].isoformat() if order.get("eta_at") is not None else None,
@@ -112,6 +113,7 @@ SENSOR_DESCRIPTIONS: tuple[DoorDashSensorDescription, ...] = (
         icon="mdi:progress-clock",
         value_fn=lambda data: data.latest_order.get("status") if data.latest_order else None,
         attrs_fn=lambda data: {
+            "raw_status": data.latest_order.get("raw_status") if data.latest_order else None,
             "latest_order": _serialize_order(data.latest_order),
             "all_orders": _serialize_orders(data.orders),
         },
