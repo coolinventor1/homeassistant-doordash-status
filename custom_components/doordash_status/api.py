@@ -9,7 +9,7 @@ import json
 import logging
 import re
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 try:
     import aiohttp
@@ -655,8 +655,6 @@ def _looks_like_login_page(final_url: str, html: str) -> bool:
 def _extract_orders_from_html(html: str, page_url: str) -> list[dict[str, Any]]:
     """Extract order-like payloads from a DoorDash HTML page."""
     detail_candidate = _extract_order_detail_from_text(html, page_url)
-    if _extract_order_uuid_from_page_url(page_url) is not None and detail_candidate is not None:
-        return [detail_candidate]
 
     collector = _ScriptCollector()
     collector.feed(html)
@@ -798,6 +796,7 @@ def _extract_order_summaries_from_text(html: str, page_url: str) -> list[dict[st
         summaries.append(
             {
                 "id": order_id,
+                "source_type": "visible_order_history",
                 "source_order_id": None,
                 "raw_status": None,
                 "status": "Delivered",
@@ -929,6 +928,7 @@ def _extract_order_detail_from_text(
 
     return {
         "id": str(source_order_id or order_detail_url),
+        "source_type": "detail_page_text",
         "source_order_id": source_order_id,
         "order_detail_url": order_detail_url,
         "raw_status": raw_status,
@@ -1704,7 +1704,8 @@ def _orders_match(left: dict[str, Any], right: dict[str, Any]) -> bool:
 def _merge_order_into(target: dict[str, Any], incoming: dict[str, Any]) -> None:
     """Merge a normalized order fragment into the target order."""
     prefer_incoming_receipt = bool(
-        incoming.get("order_detail_url")
+        incoming.get("source_type") == "detail_page_text"
+        and incoming.get("order_detail_url")
         and (
             (
                 incoming.get("source_order_id") is not None
@@ -1948,7 +1949,11 @@ def _should_replace_items(target: dict[str, Any], incoming: dict[str, Any]) -> b
 
 def _display_needs_cleanup(display: str | None) -> bool:
     """Return whether a display string looks less polished than a replacement."""
-    return isinstance(display, str) and display.strip().startswith("$$")
+    if not isinstance(display, str):
+        return False
+
+    stripped = display.strip()
+    return not stripped.startswith("$") or stripped.startswith("$$")
 
 
 def _is_midnight_timestamp(value: datetime) -> bool:
@@ -1985,6 +1990,10 @@ def _items_are_placeholders(items: list[dict[str, Any]]) -> bool:
 
 def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict[str, Any] | None:
     """Convert a JSON object into a normalized order summary when it looks like one."""
+    tracking_candidate = _normalize_tracking_status_candidate(candidate, page_url)
+    if tracking_candidate is not None:
+        return tracking_candidate
+
     order_id = _first_value(
         candidate,
         "order_id",
@@ -2107,6 +2116,7 @@ def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict
 
     return {
         "id": str(synthetic_id),
+        "source_type": "generic_payload",
         "source_order_id": str(order_id) if order_id is not None else None,
         "order_detail_url": order_detail_url,
         "raw_status": raw_status,
@@ -2136,6 +2146,243 @@ def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict
         "confidence": confidence,
         "status_candidates": status_candidates,
         "money_candidates": money_candidates,
+    }
+
+
+def _normalize_tracking_status_candidate(
+    candidate: dict[str, Any],
+    page_url: str,
+) -> dict[str, Any] | None:
+    """Normalize DoorDash's embedded merchantOrderStatus payload from order detail pages."""
+    order_details = candidate.get("orderDetails")
+    if not isinstance(order_details, dict):
+        return None
+
+    if not any(
+        isinstance(candidate.get(key), dict)
+        for key in ("dasherDetails", "merchantDetails", "deliveryDetails", "etaDetails")
+    ):
+        return None
+
+    order_id = _stringify(
+        _first_value(
+            order_details,
+            "orderUuid",
+            "order_uuid",
+            "orderId",
+            "order_id",
+        )
+    )
+    if order_id is None:
+        return None
+
+    merchant_details = (
+        candidate.get("merchantDetails")
+        if isinstance(candidate.get("merchantDetails"), dict)
+        else {}
+    )
+    delivery_details = (
+        candidate.get("deliveryDetails")
+        if isinstance(candidate.get("deliveryDetails"), dict)
+        else {}
+    )
+    eta_details = (
+        candidate.get("etaDetails") if isinstance(candidate.get("etaDetails"), dict) else {}
+    )
+    dasher_details = (
+        candidate.get("dasherDetails")
+        if isinstance(candidate.get("dasherDetails"), dict)
+        else {}
+    )
+    dropoff_details = (
+        delivery_details.get("dropOffDetails")
+        if isinstance(delivery_details.get("dropOffDetails"), dict)
+        else {}
+    )
+
+    raw_status = _normalize_status(
+        _stringify(_first_value(order_details, "orderStatus", "order_status"))
+    ) or _normalize_status(_stringify(_extract_status(candidate)))
+
+    store_name = _stringify(
+        _first_value(
+            merchant_details,
+            "name",
+            "storeName",
+            "merchantName",
+            "store_name",
+            "merchant_name",
+            "businessName",
+            "business_name",
+        )
+    ) or _extract_store_name(candidate)
+
+    delivered_at = _parse_any_datetime(
+        _first_value(eta_details, "actualDeliveryTime", "actual_delivery_time")
+    ) or _parse_any_datetime(
+        _first_value(
+            order_details,
+            "terminalStateTimestamp",
+            "terminal_state_timestamp",
+        )
+    )
+    updated_at = _parse_any_datetime(
+        _first_value(
+            order_details,
+            "orderStatusLastUpdated",
+            "order_status_last_updated",
+            "terminalStateTimestamp",
+            "terminal_state_timestamp",
+        )
+    ) or delivered_at
+    created_at = _parse_any_datetime(
+        _first_value(delivery_details, "createdAt", "created_at")
+    ) or _parse_any_datetime(
+        _first_value(
+            order_details,
+            "createdAt",
+            "created_at",
+            "submittedAt",
+            "submitted_at",
+            "placedAt",
+            "placed_at",
+        )
+    )
+    eta_at = _parse_any_datetime(
+        _first_value(
+            eta_details,
+            "estimatedDeliveryTime",
+            "estimated_delivery_time",
+            "quotedDeliveryTime",
+            "quoted_delivery_time",
+            "maxEstimatedDeliveryTime",
+            "max_estimated_delivery_time",
+            "minEstimatedDeliveryTime",
+            "min_estimated_delivery_time",
+        )
+    )
+    eta_text = _stringify(_first_value(eta_details, "etaMessage", "eta_message"))
+
+    total_display, total_amount = _extract_total(candidate)
+    total_display = _normalize_total_display(total_display, total_amount)
+    subtotal_display, subtotal_amount = _extract_subtotal(candidate)
+    subtotal_display = _normalize_total_display(subtotal_display, subtotal_amount)
+    tip_display, tip_amount = _extract_tip(candidate)
+    tip_display = _normalize_total_display(tip_display, tip_amount)
+    tax_display, tax_amount = _extract_tax(candidate)
+    tax_display = _normalize_total_display(tax_display, tax_amount)
+    fees_display, fees_amount = _extract_fees(candidate)
+    fees_display = _normalize_total_display(fees_display, fees_amount)
+
+    items: list[dict[str, Any]] = []
+    item_details = order_details.get("itemDetails")
+    if isinstance(item_details, dict):
+        raw_items = item_details.get("items")
+        if isinstance(raw_items, list):
+            items = _normalize_item_list(raw_items)
+    if not items:
+        items = _extract_items(candidate)
+
+    dasher_name = _stringify(_first_value(dasher_details, "name")) or _extract_dasher_name(
+        candidate
+    )
+    fulfillment_type = _stringify(
+        _first_value(
+            delivery_details,
+            "fulfillmentType",
+            "fulfillment_type",
+            "orderProtocolType",
+            "order_protocol_type",
+        )
+    )
+    tracking_url = _normalize_url(
+        _find_nested_value(
+            candidate,
+            "share_tracking_url",
+            "shareTrackingUrl",
+            "tracking_url",
+            "trackingUrl",
+        ),
+        page_url,
+    )
+    help_url = _normalize_url(
+        _find_nested_value(candidate, "help_url", "helpUrl"),
+        page_url,
+    )
+    milestone_text = _stringify(_first_value(dropoff_details, "title"))
+    milestone_message = _stringify(_first_value(dropoff_details, "subtitle"))
+    dropoff_photo_url = _normalize_url(
+        _first_value(dropoff_details, "imageUrl", "image_url"),
+        page_url,
+    )
+
+    status_candidates = _collect_status_candidates(candidate)
+    if raw_status and not any(
+        entry.get("key") == "orderDetails.orderStatus" and entry.get("value") == raw_status
+        for entry in status_candidates
+        if isinstance(entry, dict)
+    ):
+        status_candidates.insert(0, {"key": "orderDetails.orderStatus", "value": raw_status})
+
+    money_candidates = _collect_money_candidates(candidate)
+    status = _derive_status(
+        raw_status=raw_status,
+        created_at=created_at,
+        updated_at=updated_at,
+        eta_at=eta_at,
+        eta_text=eta_text,
+        dasher_name=dasher_name,
+    )
+    confidence = max(
+        8,
+        _score_order_candidate(
+            order_id=order_id,
+            tracking_url=tracking_url,
+            store_name=store_name,
+            status=raw_status,
+            created_at=created_at,
+            updated_at=updated_at,
+            total_display=total_display,
+            total_amount=total_amount,
+            items=items,
+        ),
+    )
+
+    return {
+        "id": str(order_id),
+        "source_type": "tracking_payload",
+        "source_order_id": order_id,
+        "order_detail_url": _build_order_detail_url(order_id, page_url),
+        "raw_status": raw_status,
+        "status": status,
+        "store_name": store_name,
+        "eta_at": eta_at,
+        "eta_text": eta_text,
+        "delivered_at": delivered_at if status == "Delivered" else None,
+        "updated_at": updated_at,
+        "created_at": created_at,
+        "total_display": total_display,
+        "total_amount": total_amount,
+        "subtotal_display": subtotal_display,
+        "subtotal_amount": subtotal_amount,
+        "tip_display": tip_display,
+        "tip_amount": tip_amount,
+        "tax_display": tax_display,
+        "tax_amount": tax_amount,
+        "fees_display": fees_display,
+        "fees_amount": fees_amount,
+        "fulfillment_type": fulfillment_type,
+        "tracking_url": tracking_url,
+        "help_url": help_url,
+        "dasher_name": dasher_name,
+        "items": items,
+        "item_count": _count_items(items) if items else None,
+        "confidence": confidence,
+        "status_candidates": status_candidates,
+        "money_candidates": money_candidates,
+        "milestone_text": milestone_text,
+        "milestone_message": milestone_message,
+        "dropoff_photo_url": dropoff_photo_url,
     }
 
 
@@ -2509,6 +2756,10 @@ def _extract_total(candidate: dict[str, Any]) -> tuple[str | None, float | None]
         "orderTotal",
         "grand_total",
         "grandTotal",
+        "total_charged",
+        "totalCharged",
+        "amount_charged",
+        "amountCharged",
         "subtotal",
         "subTotal",
         "display_total",
@@ -2527,6 +2778,8 @@ def _extract_total(candidate: dict[str, Any]) -> tuple[str | None, float | None]
         "orderTotal",
         "grand_total",
         "grandTotal",
+        "total_charged",
+        "totalCharged",
         "subtotal",
         "subTotal",
         "display_total",
@@ -2879,6 +3132,14 @@ def _extract_items(candidate: dict[str, Any]) -> list[dict[str, Any]]:
         if normalized:
             return normalized
 
+    item_details = candidate.get("itemDetails")
+    if isinstance(item_details, dict):
+        detail_items = item_details.get("items")
+        if isinstance(detail_items, list):
+            normalized = _normalize_item_list(detail_items)
+            if normalized:
+                return normalized
+
     nested_items = _find_nested_items(candidate)
     if nested_items:
         return nested_items
@@ -3045,6 +3306,16 @@ def _normalize_item_list(value: list[Any]) -> list[dict[str, Any]]:
         except (TypeError, ValueError):
             quantity = 1
 
+        description = _stringify(
+            _first_value(
+                item,
+                "description",
+                "specialInstructions",
+                "special_instructions",
+                "item_description",
+                "itemDescription",
+            )
+        )
         unit_price_amount = _extract_item_unit_price_amount(item)
         line_total_amount = (
             round(unit_price_amount * quantity, 2)
@@ -3056,6 +3327,7 @@ def _normalize_item_list(value: list[Any]) -> list[dict[str, Any]]:
             {
                 "name": name.strip(),
                 "quantity": quantity,
+                "description": description,
                 "unit_price_amount": unit_price_amount,
                 "unit_price_display": (
                     f"${unit_price_amount:.2f}"
@@ -3401,6 +3673,10 @@ def _normalize_money(value: Any) -> tuple[str | None, float | None]:
         cleaned = value.strip()
         if not cleaned:
             return None, None
+        if cleaned.casefold() in {"$undefined", "undefined", "$null", "null"}:
+            return None, None
+        if cleaned.startswith("$D"):
+            return None, None
         number_match = re.search(r"-?\d+(?:\.\d+)?", cleaned.replace(",", ""))
         amount = float(number_match.group(0)) if number_match else None
         return cleaned, amount
@@ -3472,6 +3748,10 @@ def _parse_any_datetime(value: Any) -> datetime | None:
         stripped = value.strip()
         if not stripped:
             return None
+        if stripped.casefold() in {"$undefined", "undefined", "$null", "null"}:
+            return None
+        if stripped.startswith("$D"):
+            stripped = stripped[2:]
         parsed = dt_util.parse_datetime(stripped)
         if parsed is not None:
             return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=dt_util.UTC)
@@ -3517,6 +3797,8 @@ def _stringify(value: Any) -> str | None:
         return None
     if isinstance(value, str):
         stripped = value.strip()
+        if stripped.casefold() in {"$undefined", "undefined", "$null", "null"}:
+            return None
         return stripped or None
     if isinstance(value, (int, float)):
         return str(value)
