@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -33,11 +36,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     coordinator = DoorDashDataUpdateCoordinator(hass, entry, client)
-    await coordinator.async_config_entry_first_refresh()
-
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    async def _async_initial_refresh() -> None:
+        """Fetch the first DoorDash snapshot without blocking HA startup."""
+        with suppress(asyncio.CancelledError):
+            await coordinator.async_refresh()
+
+    initial_refresh_task = hass.async_create_task(
+        _async_initial_refresh(),
+        name=f"{DOMAIN}_{entry.entry_id}_initial_refresh",
+    )
+    entry.async_on_unload(initial_refresh_task.cancel)
     return True
 
 

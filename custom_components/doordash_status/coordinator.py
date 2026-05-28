@@ -53,6 +53,11 @@ class DoorDashDataUpdateCoordinator(DataUpdateCoordinator[DoorDashSnapshot]):
             update_interval=timedelta(minutes=interval_minutes),
         )
         self._client = client
+        self.data = DoorDashSnapshot(
+            orders=[],
+            active_orders=[],
+            latest_order=None,
+        )
 
     async def _async_update_data(self) -> DoorDashSnapshot:
         """Fetch the latest DoorDash order snapshot."""
