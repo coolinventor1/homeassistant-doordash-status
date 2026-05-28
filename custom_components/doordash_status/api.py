@@ -282,6 +282,45 @@ _ACTIVE_ORDER_STATUSES = {
 }
 _TERMINAL_ORDER_STATUSES = {"Delivered", "Cancelled", "Issue"}
 _FALLBACK_ORDER_STATUSES = {"Unknown", "Delivered"}
+_DETAIL_RECEIPT_LABELS = {
+    "Subtotal": "subtotal",
+    "Delivery Fee": "delivery_fee",
+    "Service Fee": "service_fee",
+    "Express Fee": "express_fee",
+    "Small Order Fee": "small_order_fee",
+    "Regulatory Response Fee": "regulatory_response_fee",
+    "Estimated Tax": "tax",
+    "Dasher Tip": "tip",
+    "Total": "total",
+}
+_DETAIL_PAYMENT_LABEL = "Payment"
+_DETAIL_ADDRESS_LABEL = "Address"
+_DETAIL_RECEIPT_STOP_LABELS = {
+    *_DETAIL_RECEIPT_LABELS.keys(),
+    _DETAIL_PAYMENT_LABEL,
+    _DETAIL_ADDRESS_LABEL,
+}
+_DETAIL_IGNORE_CHUNKS = {
+    "DoorDash",
+    "Rate store",
+    "Icon Loading",
+}
+_DETAIL_ADDRESS_STOP_CHUNKS = {
+    "Create a business profile",
+    "Keep track of your business receipts",
+    "Gift box icon",
+    "Get $1 off. Invite friends",
+}
+_DELIVERY_INSTRUCTION_PREFIXES = (
+    "leave at",
+    "hand it to",
+    "meet at",
+    "call when",
+    "text when",
+)
+_DROPOFF_PHOTO_RE = re.compile(
+    r"https://dasher-dropoff-photos\.doordash\.com/[^\s\"'<>]+"
+)
 
 
 class DoorDashApiError(Exception):
@@ -364,7 +403,45 @@ class DoorDashApiClient:
             return _extract_orders_from_html(html, str(final_url))
 
         html, final_url = await self._async_get_orders_page()
-        return _extract_orders_from_html(html, str(final_url))
+        orders = _extract_orders_from_html(html, str(final_url))
+        return await self._async_enrich_orders_with_detail_page(orders)
+
+    async def _async_enrich_orders_with_detail_page(
+        self,
+        orders: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Enrich the latest orders with the richer direct order detail page when possible."""
+        detail_url = next(
+            (
+                order.get("order_detail_url")
+                for order in orders
+                if isinstance(order.get("order_detail_url"), str)
+                and order["order_detail_url"].strip()
+            ),
+            None,
+        )
+        if detail_url is None:
+            return orders
+
+        try:
+            detail_html, detail_final_url = await self._async_get_text(detail_url)
+        except DoorDashApiError as err:
+            _LOGGER.debug(
+                "DoorDash detail-page enrichment failed for %s: %s",
+                detail_url,
+                err,
+            )
+            return orders
+
+        detail_orders = _extract_orders_from_html(detail_html, str(detail_final_url))
+        if not detail_orders:
+            return orders
+
+        return sorted(
+            _merge_orders([*orders, *detail_orders]),
+            key=_order_sort_key,
+            reverse=True,
+        )
 
     async def _async_get_orders_page(self) -> tuple[str, aiohttp.client_reqrep.URL]:
         """Fetch a logged-in DoorDash orders page using a few likely routes."""
@@ -505,6 +582,10 @@ def _looks_like_login_page(final_url: str, html: str) -> bool:
 
 def _extract_orders_from_html(html: str, page_url: str) -> list[dict[str, Any]]:
     """Extract order-like payloads from a DoorDash HTML page."""
+    detail_candidate = _extract_order_detail_from_text(html, page_url)
+    if _extract_order_uuid_from_page_url(page_url) is not None and detail_candidate is not None:
+        return [detail_candidate]
+
     collector = _ScriptCollector()
     collector.feed(html)
 
@@ -512,6 +593,8 @@ def _extract_orders_from_html(html: str, page_url: str) -> list[dict[str, Any]]:
     for payload in _extract_json_payloads(collector.scripts):
         candidates.extend(_find_orders(payload, page_url))
     candidates.extend(_extract_order_summaries_from_text(html, page_url))
+    if detail_candidate is not None:
+        candidates.append(detail_candidate)
 
     orders = _merge_orders(candidates)
 
@@ -687,8 +770,517 @@ def _extract_order_summaries_from_text(html: str, page_url: str) -> list[dict[st
 
 def _sanitize_visible_chunks(chunks: list[str]) -> list[str]:
     """Drop boilerplate text chunks that interfere with history parsing."""
-    ignored = {"Icon Loading"}
-    return [chunk for chunk in chunks if chunk not in ignored]
+    return [chunk for chunk in chunks if chunk not in _DETAIL_IGNORE_CHUNKS]
+
+
+def _extract_order_detail_from_text(
+    html: str,
+    page_url: str,
+) -> dict[str, Any] | None:
+    """Extract a richer single-order record from a direct DoorDash order detail page."""
+    collector = _VisibleTextCollector()
+    collector.feed(html)
+
+    chunks = _sanitize_visible_chunks(collector.text_chunks)
+    receipt_start = next(
+        (index for index, chunk in enumerate(chunks) if chunk == "Subtotal"),
+        None,
+    )
+    item_count_index = next(
+        (
+            index
+            for index, chunk in enumerate(chunks)
+            if re.fullmatch(r"\d+\s+items?", chunk, re.IGNORECASE)
+        ),
+        None,
+    )
+    if receipt_start is None or item_count_index is None:
+        return None
+
+    store_name = chunks[item_count_index - 1] if item_count_index > 0 else None
+    if not _looks_like_store_name(store_name):
+        return None
+
+    source_order_id = _extract_order_uuid_from_page_url(page_url)
+    order_detail_url = _build_order_detail_url(source_order_id, page_url) or page_url
+
+    raw_status, delivered_at, status_step_text, status_message = _parse_detail_header(chunks)
+    milestone_text, milestone_message = _parse_detail_milestone(chunks)
+    items = _parse_detail_page_items(chunks, item_count_index + 1, receipt_start)
+    receipt_fields = _parse_detail_receipt(chunks, receipt_start)
+    payment_fields = _parse_detail_payment(chunks)
+    address_fields = _parse_detail_address(chunks)
+    fulfillment_type = _stringify(
+        next(
+            (
+                chunk
+                for chunk in chunks
+                if chunk in {"Personal", "Business", "Group"}
+            ),
+            None,
+        )
+    )
+
+    created_at = payment_fields.get("payment_time")
+    if not isinstance(created_at, datetime):
+        created_at = None
+
+    status = _normalize_status_label(raw_status) or "Unknown"
+    updated_at = delivered_at or created_at
+    total_display = _normalize_total_display(
+        receipt_fields.get("total_display"),
+        receipt_fields.get("total_amount"),
+    )
+
+    money_candidates = [
+        {
+            "key": f"detail_receipt.{label}",
+            "label": label.replace("_", " "),
+            "display": receipt_fields.get(f"{label}_display"),
+            "amount": receipt_fields.get(f"{label}_amount"),
+            "score": 10 if label == "total" else 7,
+        }
+        for label in (
+            "subtotal",
+            "delivery_fee",
+            "service_fee",
+            "express_fee",
+            "small_order_fee",
+            "regulatory_response_fee",
+            "tax",
+            "tip",
+            "total",
+        )
+        if receipt_fields.get(f"{label}_display") is not None
+        or receipt_fields.get(f"{label}_amount") is not None
+    ]
+
+    return {
+        "id": str(source_order_id or order_detail_url),
+        "source_order_id": source_order_id,
+        "order_detail_url": order_detail_url,
+        "raw_status": raw_status,
+        "status": status,
+        "store_name": store_name,
+        "eta_at": None,
+        "eta_text": None,
+        "delivered_at": delivered_at if status == "Delivered" else None,
+        "updated_at": updated_at,
+        "created_at": created_at,
+        "total_display": total_display,
+        "total_amount": receipt_fields.get("total_amount"),
+        "subtotal_display": _normalize_total_display(
+            receipt_fields.get("subtotal_display"),
+            receipt_fields.get("subtotal_amount"),
+        ),
+        "subtotal_amount": receipt_fields.get("subtotal_amount"),
+        "tip_display": _normalize_total_display(
+            receipt_fields.get("tip_display"),
+            receipt_fields.get("tip_amount"),
+        ),
+        "tip_amount": receipt_fields.get("tip_amount"),
+        "tax_display": _normalize_total_display(
+            receipt_fields.get("tax_display"),
+            receipt_fields.get("tax_amount"),
+        ),
+        "tax_amount": receipt_fields.get("tax_amount"),
+        "fees_display": _normalize_total_display(
+            receipt_fields.get("fees_display"),
+            receipt_fields.get("fees_amount"),
+        ),
+        "fees_amount": receipt_fields.get("fees_amount"),
+        "fulfillment_type": fulfillment_type,
+        "tracking_url": None,
+        "help_url": None,
+        "dasher_name": _parse_detail_dasher_name(chunks, item_count_index),
+        "items": items,
+        "item_count": _parse_header_item_count(chunks[item_count_index]) or _count_items(items),
+        "confidence": 11,
+        "status_candidates": [
+            {"key": "detail_heading", "value": raw_status},
+            {"key": "detail_milestone", "value": milestone_text},
+        ]
+        if raw_status or milestone_text
+        else [],
+        "money_candidates": money_candidates,
+        "status_step_text": status_step_text,
+        "status_message": status_message,
+        "milestone_text": milestone_text,
+        "milestone_message": milestone_message,
+        "payment_method": payment_fields.get("payment_method"),
+        "payment_time": payment_fields.get("payment_time"),
+        "payment_amount_display": payment_fields.get("payment_amount_display"),
+        "payment_amount": payment_fields.get("payment_amount"),
+        "delivery_address": address_fields.get("delivery_address"),
+        "delivery_address_lines": address_fields.get("delivery_address_lines"),
+        "delivery_instructions": address_fields.get("delivery_instructions"),
+        "dropoff_photo_url": _extract_dropoff_photo_url(html),
+        "delivery_fee_display": receipt_fields.get("delivery_fee_display"),
+        "delivery_fee_amount": receipt_fields.get("delivery_fee_amount"),
+        "delivery_fee_original_display": receipt_fields.get("delivery_fee_original_display"),
+        "delivery_fee_original_amount": receipt_fields.get("delivery_fee_original_amount"),
+        "service_fee_display": receipt_fields.get("service_fee_display"),
+        "service_fee_amount": receipt_fields.get("service_fee_amount"),
+        "service_fee_original_display": receipt_fields.get("service_fee_original_display"),
+        "service_fee_original_amount": receipt_fields.get("service_fee_original_amount"),
+        "express_fee_display": receipt_fields.get("express_fee_display"),
+        "express_fee_amount": receipt_fields.get("express_fee_amount"),
+        "small_order_fee_display": receipt_fields.get("small_order_fee_display"),
+        "small_order_fee_amount": receipt_fields.get("small_order_fee_amount"),
+        "regulatory_response_fee_display": receipt_fields.get(
+            "regulatory_response_fee_display"
+        ),
+        "regulatory_response_fee_amount": receipt_fields.get(
+            "regulatory_response_fee_amount"
+        ),
+    }
+
+
+def _extract_order_uuid_from_page_url(page_url: str) -> str | None:
+    """Extract an order UUID from a DoorDash order-detail URL."""
+    match = re.search(
+        r"/orders/(?P<uuid>[0-9a-fA-F-]{36})/?",
+        page_url,
+    )
+    if match is None:
+        return None
+    candidate = match.group("uuid")
+    return candidate if _UUID_RE.fullmatch(candidate) else None
+
+
+def _parse_detail_header(
+    chunks: list[str],
+) -> tuple[str | None, datetime | None, str | None, str | None]:
+    """Parse the primary detail-page status header block."""
+    raw_status = next(
+        (
+            chunk
+            for chunk in chunks
+            if chunk.startswith("Order ") and "dropped off" not in chunk.casefold()
+        ),
+        None,
+    )
+    raw_status_index = chunks.index(raw_status) if raw_status in chunks else -1
+
+    delivered_at = None
+    for chunk in chunks:
+        delivered_at = _parse_detail_datetime(chunk)
+        if delivered_at is not None:
+            break
+
+    status_step_text = next(
+        (
+            chunk
+            for chunk in chunks
+            if re.fullmatch(
+                r":\s*Step\s+\d+\s+out of\s+\d+",
+                chunk,
+                re.IGNORECASE,
+            )
+        ),
+        None,
+    )
+    status_message = None
+    if raw_status_index != -1:
+        for chunk in chunks[raw_status_index + 1 : raw_status_index + 6]:
+            if (
+                chunk == status_step_text
+                or _parse_detail_datetime(chunk) is not None
+                or chunk.startswith("Order ")
+            ):
+                continue
+            if "your order" in chunk.casefold():
+                status_message = chunk
+                break
+
+    return raw_status, delivered_at, status_step_text, status_message
+
+
+def _parse_detail_milestone(chunks: list[str]) -> tuple[str | None, str | None]:
+    """Parse the secondary milestone block from the detail page."""
+    milestone_index = next(
+        (
+            index
+            for index, chunk in enumerate(chunks)
+            if chunk.casefold() in {"order dropped off", "order picked up"}
+            or "on the way" in chunk.casefold()
+            or "arriving soon" in chunk.casefold()
+        ),
+        None,
+    )
+    if milestone_index is None:
+        return None, None
+
+    message = None
+    if milestone_index + 1 < len(chunks):
+        next_chunk = chunks[milestone_index + 1]
+        if not next_chunk.startswith("Your Dasher") and not _looks_like_store_name(next_chunk):
+            message = next_chunk
+
+    return chunks[milestone_index], message
+
+
+def _parse_detail_dasher_name(chunks: list[str], item_count_index: int) -> str | None:
+    """Parse the Dasher name when it is explicitly visible on the detail page."""
+    try:
+        dasher_index = chunks.index("Your Dasher")
+    except ValueError:
+        return None
+
+    candidate_index = dasher_index + 1
+    if candidate_index >= len(chunks):
+        return None
+
+    candidate = chunks[candidate_index]
+    if candidate_index + 2 < len(chunks):
+        store_candidate = chunks[candidate_index + 1]
+        item_count_candidate = chunks[candidate_index + 2]
+        if (
+            _looks_like_store_name(store_candidate)
+            and re.fullmatch(r"\d+\s+items?", item_count_candidate, re.IGNORECASE)
+        ):
+            if candidate != store_candidate:
+                return candidate
+
+    if candidate_index + 1 == item_count_index:
+        return None
+    if _looks_like_store_name(candidate):
+        return None
+    return candidate
+
+
+def _parse_header_item_count(text: str | None) -> int | None:
+    """Parse an item-count header like '4 Items'."""
+    if text is None:
+        return None
+    match = re.search(r"(\d+)\s+items?", text, re.IGNORECASE)
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
+def _parse_detail_page_items(
+    chunks: list[str],
+    start_index: int,
+    end_index: int,
+) -> list[dict[str, Any]]:
+    """Parse detailed line items from the visible order-detail page text."""
+    items: list[dict[str, Any]] = []
+    index = start_index
+    while index < end_index:
+        chunk = chunks[index]
+        quantity_match = re.fullmatch(r"(\d+)\s*[x×]", chunk, re.IGNORECASE)
+        if quantity_match is None:
+            index += 1
+            continue
+
+        quantity = int(quantity_match.group(1))
+        if index + 2 >= end_index:
+            break
+
+        name = chunks[index + 1]
+        price_text = chunks[index + 2]
+        line_total_amount = _normalize_money_number(price_text)
+        description_parts: list[str] = []
+        index += 3
+
+        while index < end_index:
+            candidate = chunks[index]
+            if re.fullmatch(r"(\d+)\s*[x×]", candidate, re.IGNORECASE):
+                break
+            if candidate in _DETAIL_RECEIPT_STOP_LABELS:
+                break
+            description_parts.append(candidate)
+            index += 1
+
+        unit_price_amount = None
+        if line_total_amount is not None and quantity > 0:
+            unit_price_amount = round(line_total_amount / quantity, 2)
+
+        items.append(
+            {
+                "name": name,
+                "quantity": quantity,
+                "description": " ".join(description_parts) or None,
+                "unit_price_amount": unit_price_amount,
+                "unit_price_display": (
+                    f"${unit_price_amount:.2f}"
+                    if isinstance(unit_price_amount, (int, float))
+                    else None
+                ),
+                "line_total_amount": line_total_amount,
+                "line_total_display": (
+                    _normalize_total_display(price_text, line_total_amount)
+                    if line_total_amount is not None
+                    else None
+                ),
+            }
+        )
+
+    return items
+
+
+def _parse_detail_receipt(chunks: list[str], start_index: int) -> dict[str, Any]:
+    """Parse receipt totals and fee breakdowns from a detail page."""
+    receipt: dict[str, Any] = {}
+    fee_components: dict[str, float] = {}
+    index = start_index
+    while index < len(chunks):
+        label = chunks[index]
+        component = _DETAIL_RECEIPT_LABELS.get(label)
+        if component is None:
+            if label in {_DETAIL_PAYMENT_LABEL, _DETAIL_ADDRESS_LABEL}:
+                break
+            index += 1
+            continue
+
+        index += 1
+        amount_texts: list[str] = []
+        while index < len(chunks) and chunks[index] not in _DETAIL_RECEIPT_STOP_LABELS:
+            if _looks_like_money_string(chunks[index]):
+                amount_texts.append(chunks[index])
+            index += 1
+
+        if not amount_texts:
+            continue
+
+        effective_display = amount_texts[-1]
+        effective_amount = _normalize_money_number(effective_display)
+        receipt[f"{component}_display"] = _normalize_total_display(
+            effective_display,
+            effective_amount,
+        )
+        receipt[f"{component}_amount"] = effective_amount
+
+        if len(amount_texts) > 1:
+            original_display = amount_texts[0]
+            original_amount = _normalize_money_number(original_display)
+            receipt[f"{component}_original_display"] = _normalize_total_display(
+                original_display,
+                original_amount,
+            )
+            receipt[f"{component}_original_amount"] = original_amount
+
+        if component.endswith("_fee") and effective_amount is not None:
+            fee_components[component] = effective_amount
+
+    if fee_components:
+        fees_amount = round(sum(fee_components.values()), 2)
+        receipt["fees_amount"] = fees_amount
+        receipt["fees_display"] = f"${fees_amount:.2f}"
+
+    return receipt
+
+
+def _parse_detail_payment(chunks: list[str]) -> dict[str, Any]:
+    """Parse payment method, timestamp, and amount from a detail page."""
+    try:
+        payment_index = chunks.index(_DETAIL_PAYMENT_LABEL)
+    except ValueError:
+        return {}
+
+    details = chunks[payment_index + 1] if payment_index + 1 < len(chunks) else None
+    amount_text = (
+        chunks[payment_index + 2]
+        if payment_index + 2 < len(chunks) and _looks_like_money_string(chunks[payment_index + 2])
+        else None
+    )
+
+    payment_method = None
+    payment_time = None
+    if isinstance(details, str):
+        parts = [part.strip() for part in details.split("·") if part.strip()]
+        if parts:
+            payment_method = parts[0]
+        if len(parts) >= 3:
+            payment_time = _parse_detail_datetime(f"{parts[1]} at {parts[2]}")
+
+    payment_amount = _normalize_money_number(amount_text)
+    return {
+        "payment_method": payment_method,
+        "payment_time": payment_time,
+        "payment_amount_display": _normalize_total_display(amount_text, payment_amount),
+        "payment_amount": payment_amount,
+    }
+
+
+def _parse_detail_address(chunks: list[str]) -> dict[str, Any]:
+    """Parse the delivery address and instructions from a detail page."""
+    try:
+        address_index = chunks.index(_DETAIL_ADDRESS_LABEL)
+    except ValueError:
+        return {}
+
+    address_lines: list[str] = []
+    delivery_instructions = None
+    index = address_index + 1
+    while index < len(chunks):
+        chunk = chunks[index]
+        if chunk in _DETAIL_ADDRESS_STOP_CHUNKS:
+            break
+        if chunk in _DETAIL_RECEIPT_STOP_LABELS:
+            break
+        if _looks_like_delivery_instruction(chunk):
+            delivery_instructions = chunk
+            index += 1
+            continue
+        address_lines.append(chunk)
+        index += 1
+
+    return {
+        "delivery_address": _join_address_lines(address_lines),
+        "delivery_address_lines": address_lines or None,
+        "delivery_instructions": delivery_instructions,
+    }
+
+
+def _join_address_lines(lines: list[str]) -> str | None:
+    """Join visible address lines into a single readable address string."""
+    if not lines:
+        return None
+
+    cleaned = [line.strip().rstrip(",") for line in lines if line.strip()]
+    if not cleaned:
+        return None
+
+    joined = ", ".join(cleaned)
+    joined = re.sub(r"\s+,", ",", joined)
+    joined = re.sub(r",\s+,", ", ", joined)
+    return joined
+
+
+def _looks_like_delivery_instruction(text: str) -> bool:
+    """Return whether a text chunk looks like a dropoff instruction."""
+    lowered = text.casefold().strip()
+    return lowered.startswith(_DELIVERY_INSTRUCTION_PREFIXES)
+
+
+def _extract_dropoff_photo_url(html: str) -> str | None:
+    """Extract a dropoff photo URL when the detail page exposes one."""
+    match = _DROPOFF_PHOTO_RE.search(html)
+    return match.group(0) if match is not None else None
+
+
+def _parse_detail_datetime(text: str | None) -> datetime | None:
+    """Parse visible DoorDash detail-page datetimes into timezone-aware values."""
+    if text is None:
+        return None
+
+    cleaned = text.strip()
+    if not cleaned:
+        return None
+
+    local_tz = dt_util.as_local(dt_util.now()).tzinfo or dt_util.UTC
+    for fmt in (
+        "%A, %B %d, %Y at %I:%M %p",
+        "%B %d, %Y at %I:%M %p",
+        "%m/%d/%Y at %I:%M %p",
+    ):
+        try:
+            return datetime.strptime(cleaned, fmt).replace(tzinfo=local_tz)
+        except ValueError:
+            continue
+    return None
 
 
 def _parse_visible_order_meta(
@@ -972,6 +1564,17 @@ def _orders_match(left: dict[str, Any], right: dict[str, Any]) -> bool:
 
 def _merge_order_into(target: dict[str, Any], incoming: dict[str, Any]) -> None:
     """Merge a normalized order fragment into the target order."""
+    prefer_incoming_receipt = bool(
+        incoming.get("order_detail_url")
+        and (
+            (
+                incoming.get("source_order_id") is not None
+                and incoming.get("source_order_id") == target.get("source_order_id")
+            )
+            or incoming.get("order_detail_url") == target.get("order_detail_url")
+        )
+    )
+
     for key in (
         "source_order_id",
         "order_detail_url",
@@ -983,6 +1586,32 @@ def _merge_order_into(target: dict[str, Any], incoming: dict[str, Any]) -> None:
         "delivered_at",
         "dasher_name",
         "raw_status",
+        "status_step_text",
+        "status_message",
+        "milestone_text",
+        "milestone_message",
+        "payment_method",
+        "payment_time",
+        "payment_amount_display",
+        "payment_amount",
+        "delivery_address",
+        "delivery_address_lines",
+        "delivery_instructions",
+        "dropoff_photo_url",
+        "delivery_fee_display",
+        "delivery_fee_amount",
+        "delivery_fee_original_display",
+        "delivery_fee_original_amount",
+        "service_fee_display",
+        "service_fee_amount",
+        "service_fee_original_display",
+        "service_fee_original_amount",
+        "express_fee_display",
+        "express_fee_amount",
+        "small_order_fee_display",
+        "small_order_fee_amount",
+        "regulatory_response_fee_display",
+        "regulatory_response_fee_amount",
     ):
         if target.get(key) is None and incoming.get(key) is not None:
             target[key] = incoming[key]
@@ -999,10 +1628,17 @@ def _merge_order_into(target: dict[str, Any], incoming: dict[str, Any]) -> None:
         and (
             target.get("total_display") is None
             or _display_needs_cleanup(target.get("total_display"))
+            or prefer_incoming_receipt
         )
     ):
         target["total_display"] = incoming["total_display"]
-    if target.get("total_amount") is None and incoming.get("total_amount") is not None:
+    if (
+        target.get("total_amount") is None
+        or (
+            incoming.get("total_amount") is not None
+            and (target.get("total_display") is None or prefer_incoming_receipt)
+        )
+    ):
         target["total_amount"] = incoming["total_amount"]
     for component in ("subtotal", "tip", "tax", "fees"):
         display_key = f"{component}_display"
@@ -1012,10 +1648,17 @@ def _merge_order_into(target: dict[str, Any], incoming: dict[str, Any]) -> None:
             and (
                 target.get(display_key) is None
                 or _display_needs_cleanup(target.get(display_key))
+                or prefer_incoming_receipt
             )
         ):
             target[display_key] = incoming[display_key]
-        if target.get(amount_key) is None and incoming.get(amount_key) is not None:
+        if (
+            target.get(amount_key) is None
+            or (
+                incoming.get(amount_key) is not None
+                and prefer_incoming_receipt
+            )
+        ):
             target[amount_key] = incoming[amount_key]
 
     if _should_replace_items(target, incoming):

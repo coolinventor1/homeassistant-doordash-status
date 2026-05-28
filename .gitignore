@@ -4,3 +4,5 @@ cookie.txt
 .cookie.txt
 orders_snapshot.html
 orders_snapshot.json
+detail_*.html
+detail_*.json
