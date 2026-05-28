@@ -2603,18 +2603,110 @@ def _extract_dasher_name(candidate: dict[str, Any]) -> str | None:
         "courierName",
         "driver_name",
         "driverName",
+        "shopper_name",
+        "shopperName",
+        "delivery_agent_name",
+        "deliveryAgentName",
     ):
         value = candidate.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
 
-    for key in ("dasher", "courier", "driver"):
+    nested_value = _find_nested_value(
+        candidate,
+        "dasher_name",
+        "dasherName",
+        "courier_name",
+        "courierName",
+        "driver_name",
+        "driverName",
+        "shopper_name",
+        "shopperName",
+        "delivery_agent_name",
+        "deliveryAgentName",
+    )
+    if isinstance(nested_value, str) and nested_value.strip():
+        return nested_value.strip()
+
+    for key in ("dasher", "courier", "driver", "shopper", "delivery_agent", "deliveryAgent"):
         nested = candidate.get(key)
         if not isinstance(nested, dict):
             continue
-        value = _first_value(nested, "name", "display_name", "first_name")
+        value = _first_value(
+            nested,
+            "name",
+            "display_name",
+            "displayName",
+            "first_name",
+            "firstName",
+            "full_name",
+            "fullName",
+        )
         if isinstance(value, str) and value.strip():
             return value.strip()
+
+    container_tokens = (
+        "dasher",
+        "courier",
+        "driver",
+        "shopper",
+        "delivery_agent",
+        "deliveryagent",
+    )
+    name_keys = (
+        "name",
+        "display_name",
+        "displayName",
+        "first_name",
+        "firstName",
+        "full_name",
+        "fullName",
+    )
+    person_container_keys = (
+        "person",
+        "profile",
+        "user",
+        "consumer",
+        "dasher",
+        "courier",
+        "driver",
+        "shopper",
+        "delivery_agent",
+        "deliveryAgent",
+    )
+
+    queue: list[Any] = [candidate]
+    seen: set[int] = set()
+
+    while queue:
+        current = queue.pop(0)
+        if not isinstance(current, dict):
+            continue
+
+        current_id = id(current)
+        if current_id in seen:
+            continue
+        seen.add(current_id)
+
+        for key, value in current.items():
+            lowered = key.lower()
+            if isinstance(value, dict):
+                if any(token in lowered for token in container_tokens):
+                    name = _first_value(value, *name_keys)
+                    if isinstance(name, str) and name.strip():
+                        return name.strip()
+
+                    for nested_key in person_container_keys:
+                        nested_person = value.get(nested_key)
+                        if not isinstance(nested_person, dict):
+                            continue
+                        nested_name = _first_value(nested_person, *name_keys)
+                        if isinstance(nested_name, str) and nested_name.strip():
+                            return nested_name.strip()
+
+                queue.append(value)
+            elif isinstance(value, list):
+                queue.extend(item for item in value if isinstance(item, dict))
     return None
 
 
