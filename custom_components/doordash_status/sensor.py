@@ -55,6 +55,7 @@ def _serialize_order(order: dict[str, Any] | None) -> dict[str, Any] | None:
         "milestone_text": order.get("milestone_text"),
         "milestone_message": order.get("milestone_message"),
         "store_name": order.get("store_name"),
+        "store_image_url": order.get("store_image_url"),
         "eta_at": _serialize_datetime(order.get("eta_at")),
         "eta_text": order.get("eta_text"),
         "delivered_at": _serialize_datetime(order.get("delivered_at")),

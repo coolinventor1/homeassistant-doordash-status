@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
+from html import unescape
 from html.parser import HTMLParser
 import json
 import logging
@@ -320,6 +321,19 @@ _DELIVERY_INSTRUCTION_PREFIXES = (
 )
 _DROPOFF_PHOTO_RE = re.compile(
     r"https://dasher-dropoff-photos\.doordash\.com/[^\s\"'<>]+"
+)
+_DETAIL_PRELOAD_IMAGE_RE = re.compile(
+    r"<link\b"
+    r"(?=[^>]*\brel=(?:\"preload\"|'preload'|preload))"
+    r"(?=[^>]*\bas=(?:\"image\"|'image'|image))"
+    r"[^>]*\bhref=(?:\"(?P<double>[^\"]+)\"|'(?P<single>[^']+)'|(?P<bare>[^\s>]+))",
+    re.IGNORECASE,
+)
+_DETAIL_ITEM_IMAGE_BLOCK_RE = re.compile(
+    r"data-testid=(?:\"(?P<quoted_index>\d+)\"|(?P<bare_index>\d+)).*?"
+    r"<img[^>]+src=(?:\"(?P<double_src>[^\"]+)\"|'(?P<single_src>[^']+)'|(?P<bare_src>[^\s>]+))[^>]*>"
+    r".*?<span[^>]*>(?P<label>.*?)</span>",
+    re.DOTALL,
 )
 
 
@@ -798,6 +812,7 @@ def _extract_order_summaries_from_text(html: str, page_url: str) -> list[dict[st
                 "id": order_id,
                 "source_type": "visible_order_history",
                 "source_order_id": None,
+                "store_image_url": None,
                 "raw_status": None,
                 "status": "Delivered",
                 "store_name": store_name,
@@ -878,6 +893,8 @@ def _extract_order_detail_from_text(
     raw_status, delivered_at, status_step_text, status_message = _parse_detail_header(chunks)
     milestone_text, milestone_message = _parse_detail_milestone(chunks)
     items = _parse_detail_page_items(chunks, item_count_index + 1, receipt_start)
+    _apply_detail_item_images(items, _extract_detail_item_images_from_html(html))
+    _apply_ordered_item_images(items, _extract_detail_preload_item_image_urls(html))
     receipt_fields = _parse_detail_receipt(chunks, receipt_start)
     payment_fields = _parse_detail_payment(chunks)
     address_fields = _parse_detail_address(chunks)
@@ -930,6 +947,7 @@ def _extract_order_detail_from_text(
         "id": str(source_order_id or order_detail_url),
         "source_type": "detail_page_text",
         "source_order_id": source_order_id,
+        "store_image_url": _extract_detail_store_image_from_html(html, store_name),
         "order_detail_url": order_detail_url,
         "raw_status": raw_status,
         "status": status,
@@ -1128,6 +1146,125 @@ def _parse_detail_dasher_name(
             return html_candidate
 
     return None
+
+
+def _extract_detail_store_image_from_html(html: str, store_name: str | None) -> str | None:
+    """Extract the visible store image URL from a rendered DoorDash detail page."""
+    for preload_url in _extract_detail_preload_image_urls(html):
+        if "/media/restaurant/cover_square/" in preload_url:
+            return preload_url
+
+    if not store_name:
+        return None
+
+    escaped_store = re.escape(store_name)
+    pattern = re.compile(
+        rf'<img[^>]+src="(?P<src>[^"]+)"[^>]*>[\s\S]{{0,2000}}?<span[^>]*>\s*{escaped_store}\s*</span>',
+        re.DOTALL,
+    )
+    match = pattern.search(html)
+    if match is None:
+        return None
+    return _clean_detail_image_src(match.group("src"))
+
+
+def _extract_detail_preload_image_urls(html: str) -> list[str]:
+    """Extract the ordered image preload URLs from a DoorDash detail page."""
+    urls: list[str] = []
+    for match in _DETAIL_PRELOAD_IMAGE_RE.finditer(html):
+        url = _clean_detail_image_src(
+            match.group("double") or match.group("single") or match.group("bare")
+        )
+        if url is not None:
+            urls.append(url)
+    return urls
+
+
+def _extract_detail_preload_item_image_urls(html: str) -> list[str]:
+    """Extract the ordered item image URLs from detail-page preloads."""
+    return [
+        url
+        for url in _extract_detail_preload_image_urls(html)
+        if "/media/photosV2/" in url
+    ]
+
+
+def _extract_detail_item_images_from_html(html: str) -> dict[str, list[str]]:
+    """Extract visible item image URLs from a rendered DoorDash detail page."""
+    found: dict[str, list[str]] = {}
+    for match in _DETAIL_ITEM_IMAGE_BLOCK_RE.finditer(html):
+        src = _clean_detail_image_src(
+            match.group("double_src")
+            or match.group("single_src")
+            or match.group("bare_src")
+        )
+        if src is None:
+            continue
+        label = _strip_html_text(match.group("label"))
+        if not label:
+            continue
+        item_name = re.sub(r"^\d+\s*[x×]\s*", "", label, count=1, flags=re.IGNORECASE).strip()
+        if not item_name:
+            continue
+        found.setdefault(item_name, []).append(src)
+    return found
+
+
+def _apply_detail_item_images(
+    items: list[dict[str, Any]],
+    images_by_name: dict[str, list[str]],
+) -> None:
+    """Fill missing image URLs on parsed detail items from rendered HTML blocks."""
+    if not items or not images_by_name:
+        return
+
+    for item in items:
+        if item.get("image_url") is not None:
+            continue
+        name = _stringify(item.get("name"))
+        if not name:
+            continue
+        matches = images_by_name.get(name)
+        if not matches:
+            continue
+        item["image_url"] = matches.pop(0)
+
+
+def _apply_ordered_item_images(
+    items: list[dict[str, Any]],
+    ordered_image_urls: list[str],
+) -> None:
+    """Fill missing item image URLs from ordered preload links."""
+    if not items or not ordered_image_urls:
+        return
+
+    next_index = 0
+    for item in items:
+        if item.get("image_url") is not None:
+            continue
+        while next_index < len(ordered_image_urls):
+            candidate = ordered_image_urls[next_index]
+            next_index += 1
+            if candidate:
+                item["image_url"] = candidate
+                break
+
+
+def _clean_detail_image_src(value: str | None) -> str | None:
+    """Normalize a candidate image URL extracted from HTML."""
+    if not isinstance(value, str):
+        return None
+    cleaned = unescape(value).strip()
+    if not cleaned or cleaned.startswith("data:image/"):
+        return None
+    return cleaned
+
+
+def _strip_html_text(value: str) -> str:
+    """Collapse a small HTML snippet into visible text."""
+    without_comments = re.sub(r"<!--.*?-->", " ", value, flags=re.DOTALL)
+    without_tags = re.sub(r"<[^>]+>", " ", without_comments)
+    return " ".join(without_tags.split())
 
 
 def _extract_detail_dasher_name_from_html(html: str, store_name: str) -> str | None:
@@ -1717,6 +1854,7 @@ def _merge_order_into(target: dict[str, Any], incoming: dict[str, Any]) -> None:
 
     for key in (
         "source_order_id",
+        "store_image_url",
         "order_detail_url",
         "tracking_url",
         "help_url",
@@ -1803,6 +1941,8 @@ def _merge_order_into(target: dict[str, Any], incoming: dict[str, Any]) -> None:
 
     if _should_replace_items(target, incoming):
         target["items"] = incoming["items"]
+    else:
+        _merge_item_details(target.get("items"), incoming.get("items"))
     if target.get("item_count") is None and incoming.get("item_count") is not None:
         target["item_count"] = incoming["item_count"]
     elif (
@@ -1945,6 +2085,62 @@ def _should_replace_items(target: dict[str, Any], incoming: dict[str, Any]) -> b
         return True
 
     return _items_are_placeholders(target_items) and not _items_are_placeholders(incoming_items)
+
+
+def _merge_item_details(
+    target_items: Any,
+    incoming_items: Any,
+) -> None:
+    """Fill missing item fields from a matching incoming item list."""
+    if not isinstance(target_items, list) or not isinstance(incoming_items, list):
+        return
+    if not target_items or not incoming_items:
+        return
+
+    buckets: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    for target_item in target_items:
+        if not isinstance(target_item, dict):
+            continue
+        name = _stringify(target_item.get("name"))
+        if name is None:
+            continue
+        try:
+            quantity = int(target_item.get("quantity") or 1)
+        except (TypeError, ValueError):
+            quantity = 1
+        buckets.setdefault((name, quantity), []).append(target_item)
+
+    for index, incoming_item in enumerate(incoming_items):
+        if not isinstance(incoming_item, dict):
+            continue
+
+        target_item: dict[str, Any] | None = None
+        incoming_name = _stringify(incoming_item.get("name"))
+        if incoming_name is not None:
+            try:
+                incoming_quantity = int(incoming_item.get("quantity") or 1)
+            except (TypeError, ValueError):
+                incoming_quantity = 1
+            matches = buckets.get((incoming_name, incoming_quantity))
+            if matches:
+                target_item = matches.pop(0)
+
+        if target_item is None and index < len(target_items) and isinstance(target_items[index], dict):
+            target_item = target_items[index]
+
+        if target_item is None:
+            continue
+
+        for key in (
+            "description",
+            "image_url",
+            "unit_price_amount",
+            "unit_price_display",
+            "line_total_amount",
+            "line_total_display",
+        ):
+            if target_item.get(key) is None and incoming_item.get(key) is not None:
+                target_item[key] = incoming_item[key]
 
 
 def _display_needs_cleanup(display: str | None) -> bool:
@@ -2118,6 +2314,7 @@ def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict
         "id": str(synthetic_id),
         "source_type": "generic_payload",
         "source_order_id": str(order_id) if order_id is not None else None,
+        "store_image_url": _extract_store_image_url(candidate),
         "order_detail_url": order_detail_url,
         "raw_status": raw_status,
         "status": status,
@@ -2352,6 +2549,7 @@ def _normalize_tracking_status_candidate(
         "id": str(order_id),
         "source_type": "tracking_payload",
         "source_order_id": order_id,
+        "store_image_url": _extract_store_image_url(candidate),
         "order_detail_url": _build_order_detail_url(order_id, page_url),
         "raw_status": raw_status,
         "status": status,
@@ -2644,6 +2842,66 @@ def _extract_store_name(candidate: dict[str, Any]) -> str | None:
                 return value.strip()
 
     nested_value = _find_nested_store_name(candidate)
+    if isinstance(nested_value, str) and nested_value.strip():
+        return nested_value.strip()
+    return None
+
+
+def _extract_store_image_url(candidate: dict[str, Any]) -> str | None:
+    """Extract a merchant or store image URL from a candidate payload."""
+    for key in (
+        "coverSquareImgUrl",
+        "cover_square_img_url",
+        "coverSquareImageUrl",
+        "cover_square_image_url",
+        "storeImageUrl",
+        "store_image_url",
+        "merchantImageUrl",
+        "merchant_image_url",
+    ):
+        value = _stringify(candidate.get(key))
+        if value:
+            return value
+
+    for key in (
+        "store",
+        "merchant",
+        "business",
+        "restaurant",
+        "store_info",
+        "storeInfo",
+        "merchant_info",
+        "merchantInfo",
+        "restaurant_info",
+        "restaurantInfo",
+        "merchantDetails",
+    ):
+        nested = candidate.get(key)
+        if not isinstance(nested, dict):
+            continue
+        value = _stringify(
+            _first_value(
+                nested,
+                "coverSquareImgUrl",
+                "cover_square_img_url",
+                "coverSquareImageUrl",
+                "cover_square_image_url",
+                "storeImageUrl",
+                "store_image_url",
+                "merchantImageUrl",
+                "merchant_image_url",
+                "imageUrl",
+                "image_url",
+                "coverImageUrl",
+                "cover_image_url",
+                "logoUrl",
+                "logo_url",
+            )
+        )
+        if value:
+            return value
+
+    nested_value = _find_nested_store_image_url(candidate)
     if isinstance(nested_value, str) and nested_value.strip():
         return nested_value.strip()
     return None
@@ -3264,6 +3522,68 @@ def _find_nested_store_name(candidate: dict[str, Any]) -> str | None:
     return None
 
 
+def _find_nested_store_image_url(candidate: dict[str, Any]) -> str | None:
+    """Search nested merchant/store containers for a likely store image URL."""
+    container_keys = {
+        "store",
+        "merchant",
+        "business",
+        "restaurant",
+        "store_info",
+        "storeinfo",
+        "merchant_info",
+        "merchantinfo",
+        "restaurant_info",
+        "restaurantinfo",
+        "merchantdetails",
+    }
+    image_keys = (
+        "coverSquareImgUrl",
+        "cover_square_img_url",
+        "coverSquareImageUrl",
+        "cover_square_image_url",
+        "storeImageUrl",
+        "store_image_url",
+        "merchantImageUrl",
+        "merchant_image_url",
+        "imageUrl",
+        "image_url",
+        "coverImageUrl",
+        "cover_image_url",
+        "logoUrl",
+        "logo_url",
+    )
+
+    queue: list[Any] = [candidate]
+    seen: set[int] = set()
+
+    while queue:
+        current = queue.pop(0)
+        if not isinstance(current, dict):
+            continue
+
+        current_id = id(current)
+        if current_id in seen:
+            continue
+        seen.add(current_id)
+
+        for key, value in current.items():
+            lowered = key.lower()
+            if lowered in container_keys and isinstance(value, dict):
+                candidate_image = _first_value(value, *image_keys)
+                if isinstance(candidate_image, str) and candidate_image.strip():
+                    return candidate_image.strip()
+                queue.append(value)
+                continue
+
+            if isinstance(value, dict):
+                queue.append(value)
+            elif isinstance(value, list):
+                queue.extend(item for item in value if isinstance(item, dict))
+
+    return None
+
+
 def _normalize_item_list(value: list[Any]) -> list[dict[str, Any]]:
     """Normalize an item-like list into name/quantity pairs."""
     items: list[dict[str, Any]] = []
@@ -3316,6 +3636,16 @@ def _normalize_item_list(value: list[Any]) -> list[dict[str, Any]]:
                 "itemDescription",
             )
         )
+        image_url = _stringify(
+            _first_value(
+                item,
+                "imageUrl",
+                "image_url",
+                "itemImageUrl",
+                "item_image_url",
+                "image",
+            )
+        )
         unit_price_amount = _extract_item_unit_price_amount(item)
         line_total_amount = (
             round(unit_price_amount * quantity, 2)
@@ -3328,6 +3658,7 @@ def _normalize_item_list(value: list[Any]) -> list[dict[str, Any]]:
                 "name": name.strip(),
                 "quantity": quantity,
                 "description": description,
+                "image_url": image_url,
                 "unit_price_amount": unit_price_amount,
                 "unit_price_display": (
                     f"${unit_price_amount:.2f}"
