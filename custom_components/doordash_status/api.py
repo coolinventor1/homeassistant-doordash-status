@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from html import unescape
@@ -394,7 +395,11 @@ class DoorDashApiClient:
             html, final_url = await self._async_get_text(self._tracking_url)
             if "doordash" not in final_url.host.lower():
                 raise DoorDashApiError("Tracking URL did not resolve to DoorDash.")
-            orders = _extract_orders_from_html(html, str(final_url))
+            orders = await asyncio.to_thread(
+                _extract_orders_from_html,
+                html,
+                str(final_url),
+            )
             return {
                 "title": "DoorDash Status",
                 "host": final_url.host.lower(),
@@ -404,7 +409,11 @@ class DoorDashApiClient:
 
         html, final_url = await self._async_get_orders_page()
 
-        orders = _extract_orders_from_html(html, str(final_url))
+        orders = await asyncio.to_thread(
+            _extract_orders_from_html,
+            html,
+            str(final_url),
+        )
         return {
             "title": f"DoorDash @ {final_url.host}",
             "host": final_url.host.lower(),
@@ -416,10 +425,18 @@ class DoorDashApiClient:
         """Fetch and normalize the latest DoorDash orders available to this source."""
         if self._tracking_url is not None:
             html, final_url = await self._async_get_text(self._tracking_url)
-            return _extract_orders_from_html(html, str(final_url))
+            return await asyncio.to_thread(
+                _extract_orders_from_html,
+                html,
+                str(final_url),
+            )
 
         html, final_url = await self._async_get_orders_page()
-        orders = _extract_orders_from_html(html, str(final_url))
+        orders = await asyncio.to_thread(
+            _extract_orders_from_html,
+            html,
+            str(final_url),
+        )
         return await self._async_enrich_orders_with_detail_page(orders)
 
     async def _async_enrich_orders_with_detail_page(
@@ -464,17 +481,20 @@ class DoorDashApiClient:
             )
             detail_orders = []
         else:
-            detail_orders = _extract_orders_from_html(detail_html, str(detail_final_url))
+            detail_orders = await asyncio.to_thread(
+                _extract_orders_from_html,
+                detail_html,
+                str(detail_final_url),
+            )
 
         if not detail_orders and len(merged_candidates) == len(orders):
             return orders
 
         merged_candidates.extend(detail_orders)
 
-        return sorted(
-            _merge_orders(merged_candidates),
-            key=_order_sort_key,
-            reverse=True,
+        return await asyncio.to_thread(
+            _merge_and_sort_orders,
+            merged_candidates,
         )
 
     async def _async_get_orders_page(self) -> tuple[str, aiohttp.client_reqrep.URL]:
@@ -4107,6 +4127,15 @@ def _order_sort_key(order: dict[str, Any]) -> tuple[int, datetime, int, str]:
         timestamp or fallback_timestamp,
         order.get("confidence", 0),
         order["id"],
+    )
+
+
+def _merge_and_sort_orders(orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge related DoorDash fragments and sort them by recency."""
+    return sorted(
+        _merge_orders(orders),
+        key=_order_sort_key,
+        reverse=True,
     )
 
 

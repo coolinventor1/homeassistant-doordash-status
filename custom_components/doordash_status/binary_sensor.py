@@ -18,7 +18,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .api import is_active_order_status
 from .const import DOMAIN
 from .coordinator import DoorDashDataUpdateCoordinator, DoorDashSnapshot
-from .sensor import _device_info, _serialize_order
+from .sensor import _device_info
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -49,7 +49,7 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[DoorDashBinarySensorDescription, ...] = (
         attrs_fn=lambda data: {
             "tracking_url": _latest_order(data).get("tracking_url") if _latest_order(data) else None,
             "order_detail_url": _latest_order(data).get("order_detail_url") if _latest_order(data) else None,
-            "latest_order": _serialize_order(_latest_order(data)),
+            "order_id": _latest_order(data).get("id") if _latest_order(data) else None,
         },
     ),
     DoorDashBinarySensorDescription(
@@ -59,7 +59,7 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[DoorDashBinarySensorDescription, ...] = (
         value_fn=lambda data: bool(_latest_order(data) and _latest_order(data).get("dasher_name")),
         attrs_fn=lambda data: {
             "dasher_name": _latest_order(data).get("dasher_name") if _latest_order(data) else None,
-            "latest_order": _serialize_order(_latest_order(data)),
+            "order_id": _latest_order(data).get("id") if _latest_order(data) else None,
         },
     ),
     DoorDashBinarySensorDescription(
@@ -82,7 +82,7 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[DoorDashBinarySensorDescription, ...] = (
         attrs_fn=lambda data: {
             "status": _latest_order(data).get("status") if _latest_order(data) else None,
             "raw_status": _latest_order(data).get("raw_status") if _latest_order(data) else None,
-            "latest_order": _serialize_order(_latest_order(data)),
+            "order_id": _latest_order(data).get("id") if _latest_order(data) else None,
         },
     ),
     DoorDashBinarySensorDescription(
@@ -94,7 +94,7 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[DoorDashBinarySensorDescription, ...] = (
         ),
         attrs_fn=lambda data: {
             "status": _latest_order(data).get("status") if _latest_order(data) else None,
-            "latest_order": _serialize_order(_latest_order(data)),
+            "order_id": _latest_order(data).get("id") if _latest_order(data) else None,
         },
     ),
 )

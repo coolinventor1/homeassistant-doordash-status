@@ -41,7 +41,7 @@ def _serialize_datetime(value: Any) -> str | None:
 
 
 def _serialize_order(order: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Serialize a normalized order for state attributes."""
+    """Serialize a normalized order for lightweight state attributes."""
     if order is None:
         return None
 
@@ -53,60 +53,25 @@ def _serialize_order(order: dict[str, Any] | None) -> dict[str, Any] | None:
         "status_step_text": order.get("status_step_text"),
         "status_message": order.get("status_message"),
         "milestone_text": order.get("milestone_text"),
-        "milestone_message": order.get("milestone_message"),
         "store_name": order.get("store_name"),
-        "store_image_url": order.get("store_image_url"),
         "eta_at": _serialize_datetime(order.get("eta_at")),
         "eta_text": order.get("eta_text"),
         "delivered_at": _serialize_datetime(order.get("delivered_at")),
         "updated_at": _serialize_datetime(order.get("updated_at")),
         "created_at": _serialize_datetime(order.get("created_at")),
-        "payment_method": order.get("payment_method"),
-        "payment_time": _serialize_datetime(order.get("payment_time")),
-        "payment_amount_display": order.get("payment_amount_display"),
-        "payment_amount": order.get("payment_amount"),
         "total_display": order.get("total_display"),
-        "total_amount": order.get("total_amount"),
         "subtotal_display": order.get("subtotal_display"),
-        "subtotal_amount": order.get("subtotal_amount"),
         "tip_display": order.get("tip_display"),
-        "tip_amount": order.get("tip_amount"),
         "tax_display": order.get("tax_display"),
-        "tax_amount": order.get("tax_amount"),
         "fees_display": order.get("fees_display"),
-        "fees_amount": order.get("fees_amount"),
-        "delivery_fee_display": order.get("delivery_fee_display"),
-        "delivery_fee_amount": order.get("delivery_fee_amount"),
-        "delivery_fee_original_display": order.get("delivery_fee_original_display"),
-        "delivery_fee_original_amount": order.get("delivery_fee_original_amount"),
-        "service_fee_display": order.get("service_fee_display"),
-        "service_fee_amount": order.get("service_fee_amount"),
-        "service_fee_original_display": order.get("service_fee_original_display"),
-        "service_fee_original_amount": order.get("service_fee_original_amount"),
-        "express_fee_display": order.get("express_fee_display"),
-        "express_fee_amount": order.get("express_fee_amount"),
-        "small_order_fee_display": order.get("small_order_fee_display"),
-        "small_order_fee_amount": order.get("small_order_fee_amount"),
-        "regulatory_response_fee_display": order.get(
-            "regulatory_response_fee_display"
-        ),
-        "regulatory_response_fee_amount": order.get(
-            "regulatory_response_fee_amount"
-        ),
         "fulfillment_type": order.get("fulfillment_type"),
         "tracking_url": order.get("tracking_url"),
         "help_url": order.get("help_url"),
         "dasher_name": order.get("dasher_name"),
-        "delivery_address": order.get("delivery_address"),
-        "delivery_address_lines": order.get("delivery_address_lines"),
         "delivery_instructions": order.get("delivery_instructions"),
-        "dropoff_photo_url": order.get("dropoff_photo_url"),
-        "items": order.get("items"),
+        "has_dropoff_photo": bool(order.get("dropoff_photo_url")),
         "item_count": order.get("item_count"),
-        "confidence": order.get("confidence"),
         "source_order_id": order.get("source_order_id"),
-        "status_candidates": order.get("status_candidates"),
-        "money_candidates": order.get("money_candidates"),
     }
 
 
@@ -189,6 +154,24 @@ def _item_names(order: dict[str, Any] | None) -> list[str]:
         if isinstance(name, str) and name.strip():
             names.append(name.strip())
     return names
+
+
+def _serialize_items(order: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Return a lightweight serialized item list for state attributes."""
+    serialized: list[dict[str, Any]] = []
+    for item in _items(order):
+        if not isinstance(item, dict):
+            continue
+        serialized.append(
+            {
+                "name": item.get("name"),
+                "quantity": item.get("quantity"),
+                "description": item.get("description"),
+                "unit_price_display": item.get("unit_price_display"),
+                "line_total_display": item.get("line_total_display"),
+            }
+        )
+    return serialized
 
 
 def _format_item_label(item: dict[str, Any], *, include_quantity: bool = True) -> str | None:
@@ -464,7 +447,7 @@ SENSOR_DESCRIPTIONS: tuple[DoorDashSensorDescription, ...] = (
         icon="mdi:cart-outline",
         value_fn=lambda data: _item_count_value(data.latest_order),
         attrs_fn=lambda data: {
-            "items": _items(data.latest_order),
+            "items": _serialize_items(data.latest_order),
             "latest_order": _serialize_order(data.latest_order),
         },
     ),
@@ -474,7 +457,7 @@ SENSOR_DESCRIPTIONS: tuple[DoorDashSensorDescription, ...] = (
         icon="mdi:food-outline",
         value_fn=lambda data: _format_items_value(data.latest_order),
         attrs_fn=lambda data: {
-            "items": _items(data.latest_order),
+            "items": _serialize_items(data.latest_order),
             "item_labels": [
                 label
                 for label in (
@@ -501,7 +484,7 @@ SENSOR_DESCRIPTIONS: tuple[DoorDashSensorDescription, ...] = (
         icon="mdi:food-turkey",
         value_fn=lambda data: _first_item_value(data.latest_order),
         attrs_fn=lambda data: {
-            "items": _items(data.latest_order),
+            "items": _serialize_items(data.latest_order),
             "latest_order": _serialize_order(data.latest_order),
         },
     ),

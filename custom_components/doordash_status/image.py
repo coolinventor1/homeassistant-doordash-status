@@ -12,7 +12,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import DoorDashDataUpdateCoordinator
-from .sensor import _device_info, _items, _serialize_order
+from .sensor import _device_info, _items
 
 
 def _latest_order(coordinator: DoorDashDataUpdateCoordinator) -> dict[str, Any] | None:
@@ -118,8 +118,9 @@ class DoorDashLatestOrderStoreImage(DoorDashImageBase):
         """Return extra attributes for the latest store image."""
         latest_order = _latest_order(self.coordinator)
         return {
+            "order_id": latest_order.get("id") if latest_order else None,
             "store_name": latest_order.get("store_name") if latest_order else None,
-            "latest_order": _serialize_order(latest_order),
+            "order_detail_url": latest_order.get("order_detail_url") if latest_order else None,
         }
 
 
@@ -157,6 +158,7 @@ class DoorDashLatestOrderDropoffPhotoImage(DoorDashImageBase):
         """Return extra attributes for the latest dropoff photo."""
         latest_order = _latest_order(self.coordinator)
         return {
+            "order_id": latest_order.get("id") if latest_order else None,
             "store_name": latest_order.get("store_name") if latest_order else None,
             "status": latest_order.get("status") if latest_order else None,
             "delivered_at": (
@@ -164,7 +166,7 @@ class DoorDashLatestOrderDropoffPhotoImage(DoorDashImageBase):
                 if latest_order and latest_order.get("delivered_at") is not None
                 else None
             ),
-            "latest_order": _serialize_order(latest_order),
+            "order_detail_url": latest_order.get("order_detail_url") if latest_order else None,
         }
 
 
@@ -215,11 +217,12 @@ class DoorDashLatestOrderItemImage(DoorDashImageBase):
         item = self._item()
         latest_order = _latest_order(self.coordinator)
         return {
+            "order_id": latest_order.get("id") if latest_order else None,
             "item_index": self._index + 1,
             "item_name": item.get("name") if item else None,
             "item_quantity": item.get("quantity") if item else None,
             "item_description": item.get("description") if item else None,
             "unit_price_display": item.get("unit_price_display") if item else None,
             "line_total_display": item.get("line_total_display") if item else None,
-            "latest_order": _serialize_order(latest_order),
+            "order_detail_url": latest_order.get("order_detail_url") if latest_order else None,
         }
