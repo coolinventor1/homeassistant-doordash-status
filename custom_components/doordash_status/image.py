@@ -43,7 +43,10 @@ async def async_setup_entry(
             )
         return new_entities
 
-    entities: list[ImageEntity] = [DoorDashLatestOrderStoreImage(hass, coordinator, entry)]
+    entities: list[ImageEntity] = [
+        DoorDashLatestOrderStoreImage(hass, coordinator, entry),
+        DoorDashLatestOrderDropoffPhotoImage(hass, coordinator, entry),
+    ]
     entities.extend(_build_new_item_entities())
     async_add_entities(entities)
 
@@ -116,6 +119,51 @@ class DoorDashLatestOrderStoreImage(DoorDashImageBase):
         latest_order = _latest_order(self.coordinator)
         return {
             "store_name": latest_order.get("store_name") if latest_order else None,
+            "latest_order": _serialize_order(latest_order),
+        }
+
+
+class DoorDashLatestOrderDropoffPhotoImage(DoorDashImageBase):
+    """Image entity for the latest order's dropoff photo."""
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        coordinator: DoorDashDataUpdateCoordinator,
+        entry: ConfigEntry,
+    ) -> None:
+        """Initialize the dropoff photo image entity."""
+        super().__init__(hass, coordinator, entry)
+        self._attr_name = "Latest order dropoff photo"
+        self._attr_unique_id = f"{entry.entry_id}_latest_order_dropoff_photo"
+        self._attr_icon = "mdi:camera-image"
+
+    @property
+    def available(self) -> bool:
+        """Return whether the latest order currently exposes a dropoff photo."""
+        latest_order = _latest_order(self.coordinator)
+        return bool(latest_order and latest_order.get("dropoff_photo_url"))
+
+    @property
+    def image_url(self) -> str | None:
+        """Return the dropoff photo URL."""
+        latest_order = _latest_order(self.coordinator)
+        if latest_order is None:
+            return None
+        return latest_order.get("dropoff_photo_url")
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return extra attributes for the latest dropoff photo."""
+        latest_order = _latest_order(self.coordinator)
+        return {
+            "store_name": latest_order.get("store_name") if latest_order else None,
+            "status": latest_order.get("status") if latest_order else None,
+            "delivered_at": (
+                latest_order.get("delivered_at").isoformat()
+                if latest_order and latest_order.get("delivered_at") is not None
+                else None
+            ),
             "latest_order": _serialize_order(latest_order),
         }
 

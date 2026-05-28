@@ -248,6 +248,15 @@ def _first_item_value(order: dict[str, Any] | None) -> str | None:
     return names[0] if names else None
 
 
+def _dropoff_photo_state(order: dict[str, Any] | None) -> str | None:
+    """Return a compact sensor state for the latest dropoff photo."""
+    if order is None:
+        return None
+    if order.get("dropoff_photo_url"):
+        return "Captured"
+    return None
+
+
 def _minutes_until_eta(order: dict[str, Any] | None) -> int | None:
     """Return the number of minutes until ETA, rounded up."""
     if order is None:
@@ -493,6 +502,20 @@ SENSOR_DESCRIPTIONS: tuple[DoorDashSensorDescription, ...] = (
         value_fn=lambda data: _first_item_value(data.latest_order),
         attrs_fn=lambda data: {
             "items": _items(data.latest_order),
+            "latest_order": _serialize_order(data.latest_order),
+        },
+    ),
+    DoorDashSensorDescription(
+        key="latest_order_dropoff_photo",
+        name="Latest order dropoff photo status",
+        icon="mdi:camera-image",
+        value_fn=lambda data: _dropoff_photo_state(data.latest_order),
+        attrs_fn=lambda data: {
+            "dropoff_photo_url": (
+                data.latest_order.get("dropoff_photo_url")
+                if data.latest_order
+                else None
+            ),
             "latest_order": _serialize_order(data.latest_order),
         },
     ),
