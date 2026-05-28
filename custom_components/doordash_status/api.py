@@ -137,6 +137,9 @@ _NEXT_PUSH_RE = re.compile(
     r"self\.__next_f\.push\((?P<payload>\[.*\])\)\s*;?\s*$",
     re.DOTALL,
 )
+_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 _STATUS_KEYS = (
     "order_status",
     "orderStatus",
@@ -971,6 +974,7 @@ def _merge_order_into(target: dict[str, Any], incoming: dict[str, Any]) -> None:
     """Merge a normalized order fragment into the target order."""
     for key in (
         "source_order_id",
+        "order_detail_url",
         "tracking_url",
         "help_url",
         "store_name",
@@ -1218,6 +1222,7 @@ def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict
         _first_value(candidate, "tracking_url", "trackingUrl", "share_tracking_url"),
         page_url,
     )
+    order_detail_url = _build_order_detail_url(order_id, page_url)
     help_url = _normalize_url(_first_value(candidate, "help_url", "helpUrl"), page_url)
     raw_status = _normalize_status(_stringify(_extract_status(candidate)))
     store_name = _extract_store_name(candidate)
@@ -1321,6 +1326,7 @@ def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict
     return {
         "id": str(synthetic_id),
         "source_order_id": str(order_id) if order_id is not None else None,
+        "order_detail_url": order_detail_url,
         "raw_status": raw_status,
         "status": status,
         "store_name": store_name,
@@ -2526,6 +2532,19 @@ def _normalize_money(value: Any) -> tuple[str | None, float | None]:
         return cleaned, amount
 
     return None, None
+
+
+def _build_order_detail_url(order_id: Any, page_url: str) -> str | None:
+    """Build a direct DoorDash order detail URL when a UUID-like id is available."""
+    if not isinstance(order_id, str) or not _UUID_RE.fullmatch(order_id.strip()):
+        return None
+
+    parsed = urlsplit(page_url)
+    base = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else "https://www.doordash.com"
+    return (
+        f"{base}/orders/{order_id.strip()}/"
+        "?fromCheckout=true&userResumed=false&doubledash-redirect=false"
+    )
 
 
 def _looks_like_money_string(value: str) -> bool:

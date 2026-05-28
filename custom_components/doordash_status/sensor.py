@@ -47,6 +47,7 @@ def _serialize_order(order: dict[str, Any] | None) -> dict[str, Any] | None:
 
     return {
         "id": order.get("id"),
+        "order_detail_url": order.get("order_detail_url"),
         "raw_status": order.get("raw_status"),
         "status": order.get("status"),
         "store_name": order.get("store_name"),
@@ -116,6 +117,14 @@ def _money_value(order: dict[str, Any] | None, prefix: str) -> str | None:
         return f"${amount:.2f}"
 
     return None
+
+
+def _uuid_value(order: dict[str, Any] | None) -> str | None:
+    """Return the latest order UUID when one is available."""
+    if order is None:
+        return None
+    source_order_id = order.get("source_order_id")
+    return source_order_id if isinstance(source_order_id, str) and source_order_id.strip() else None
 
 
 def _item_count_value(order: dict[str, Any] | None) -> int:
@@ -291,6 +300,16 @@ SENSOR_DESCRIPTIONS: tuple[DoorDashSensorDescription, ...] = (
         icon="mdi:storefront-outline",
         value_fn=lambda data: data.latest_order.get("store_name") if data.latest_order else None,
         attrs_fn=lambda data: {
+            "latest_order": _serialize_order(data.latest_order),
+        },
+    ),
+    DoorDashSensorDescription(
+        key="latest_order_uuid",
+        name="Latest order UUID",
+        icon="mdi:identifier",
+        value_fn=lambda data: _uuid_value(data.latest_order),
+        attrs_fn=lambda data: {
+            "order_detail_url": data.latest_order.get("order_detail_url") if data.latest_order else None,
             "latest_order": _serialize_order(data.latest_order),
         },
     ),

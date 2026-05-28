@@ -39,9 +39,16 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[DoorDashBinarySensorDescription, ...] = (
         key="latest_order_tracking_available",
         name="Latest order tracking available",
         icon="mdi:map-marker-path",
-        value_fn=lambda data: bool(_latest_order(data) and _latest_order(data).get("tracking_url")),
+        value_fn=lambda data: bool(
+            _latest_order(data)
+            and (
+                _latest_order(data).get("tracking_url")
+                or _latest_order(data).get("order_detail_url")
+            )
+        ),
         attrs_fn=lambda data: {
             "tracking_url": _latest_order(data).get("tracking_url") if _latest_order(data) else None,
+            "order_detail_url": _latest_order(data).get("order_detail_url") if _latest_order(data) else None,
             "latest_order": _serialize_order(_latest_order(data)),
         },
     ),
