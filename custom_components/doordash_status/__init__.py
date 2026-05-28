@@ -10,6 +10,7 @@ from .api import DoorDashApiClient
 from .const import (
     CONF_BASE_URL,
     CONF_BROWSER_COOKIE,
+    CONF_RENDERED_HELPER_URL,
     CONF_TRACKING_URL,
     DOMAIN,
     PLATFORMS,
@@ -24,6 +25,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         session=async_get_clientsession(hass),
         base_url=options.get(CONF_BASE_URL, entry.data.get(CONF_BASE_URL, "https://www.doordash.com")),
         cookie_header=options.get(CONF_BROWSER_COOKIE, entry.data.get(CONF_BROWSER_COOKIE)),
+        rendered_helper_url=options.get(
+            CONF_RENDERED_HELPER_URL,
+            entry.data.get(CONF_RENDERED_HELPER_URL),
+        ),
         tracking_url=options.get(CONF_TRACKING_URL, entry.data.get(CONF_TRACKING_URL)),
     )
 

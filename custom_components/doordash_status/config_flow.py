@@ -19,6 +19,7 @@ from .const import (
     CONF_AUTH_MODE,
     CONF_BASE_URL,
     CONF_BROWSER_COOKIE,
+    CONF_RENDERED_HELPER_URL,
     CONF_SCAN_INTERVAL_MINUTES,
     CONF_TRACKING_URL,
     DEFAULT_BASE_URL,
@@ -41,6 +42,7 @@ class DoorDashStatusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._base_url = DEFAULT_BASE_URL
         self._tracking_url = ""
         self._browser_cookie = ""
+        self._rendered_helper_url = ""
 
     @staticmethod
     @callback
@@ -121,6 +123,9 @@ class DoorDashStatusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             try:
                 self._base_url = _normalize_url(user_input[CONF_BASE_URL], path_ok=True)
                 self._browser_cookie = _normalize_cookie_header(user_input[CONF_BROWSER_COOKIE])
+                self._rendered_helper_url = _normalize_helper_url(
+                    user_input.get(CONF_RENDERED_HELPER_URL, "")
+                )
                 info = await _async_validate_browser_session(
                     self.hass,
                     self._base_url,
@@ -142,6 +147,7 @@ class DoorDashStatusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     data={
                         CONF_BASE_URL: self._base_url,
                         CONF_BROWSER_COOKIE: self._browser_cookie,
+                        CONF_RENDERED_HELPER_URL: self._rendered_helper_url,
                     },
                 )
 
@@ -154,6 +160,10 @@ class DoorDashStatusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         default=(user_input or {}).get(CONF_BASE_URL, DEFAULT_BASE_URL),
                     ): str,
                     vol.Required(CONF_BROWSER_COOKIE): str,
+                    vol.Optional(
+                        CONF_RENDERED_HELPER_URL,
+                        default=(user_input or {}).get(CONF_RENDERED_HELPER_URL, ""),
+                    ): str,
                 }
             ),
             errors=errors,
@@ -178,6 +188,10 @@ class DoorDashStatusOptionsFlow(config_entries.OptionsFlow):
             CONF_BROWSER_COOKIE,
             data.get(CONF_BROWSER_COOKIE, ""),
         )
+        current_rendered_helper_url = options.get(
+            CONF_RENDERED_HELPER_URL,
+            data.get(CONF_RENDERED_HELPER_URL, ""),
+        )
         uses_tracking_url = current_tracking_url is not None
 
         if user_input is not None:
@@ -201,6 +215,9 @@ class DoorDashStatusOptionsFlow(config_entries.OptionsFlow):
             else:
                 try:
                     base_url = _normalize_url(user_input[CONF_BASE_URL], path_ok=True)
+                    rendered_helper_url = _normalize_helper_url(
+                        user_input.get(CONF_RENDERED_HELPER_URL, "")
+                    )
                     browser_cookie_input = _normalize_cookie_header(
                         user_input.get(CONF_BROWSER_COOKIE, "")
                     )
@@ -227,6 +244,7 @@ class DoorDashStatusOptionsFlow(config_entries.OptionsFlow):
                 else:
                     cleaned[CONF_BASE_URL] = base_url
                     cleaned[CONF_BROWSER_COOKIE] = browser_cookie
+                    cleaned[CONF_RENDERED_HELPER_URL] = rendered_helper_url
 
             if not errors:
                 return self.async_create_entry(title="", data=cleaned)
@@ -237,6 +255,7 @@ class DoorDashStatusOptionsFlow(config_entries.OptionsFlow):
                 uses_tracking_url=uses_tracking_url,
                 current_tracking_url=current_tracking_url,
                 current_base_url=current_base_url,
+                current_rendered_helper_url=current_rendered_helper_url,
                 current_scan_interval=options.get(
                     CONF_SCAN_INTERVAL_MINUTES,
                     data.get(CONF_SCAN_INTERVAL_MINUTES, DEFAULT_SCAN_INTERVAL_MINUTES),
@@ -251,6 +270,7 @@ def _build_options_schema(
     uses_tracking_url: bool,
     current_tracking_url: str | None,
     current_base_url: str,
+    current_rendered_helper_url: str,
     current_scan_interval: int,
 ) -> dict[Any, Any]:
     """Build the options schema for the current DoorDash auth mode."""
@@ -275,6 +295,10 @@ def _build_options_schema(
     schema[vol.Optional(
         CONF_BROWSER_COOKIE,
         default="",
+    )] = str
+    schema[vol.Optional(
+        CONF_RENDERED_HELPER_URL,
+        default=current_rendered_helper_url,
     )] = str
     return schema
 
@@ -311,11 +335,16 @@ async def _async_validate_browser_session(
     }
 
 
-def _normalize_url(value: str, *, path_ok: bool = False) -> str:
+def _normalize_url(
+    value: str,
+    *,
+    path_ok: bool = False,
+    default_scheme: str = "https",
+) -> str:
     """Normalize a user-provided DoorDash URL."""
     candidate = value.strip()
     if "://" not in candidate:
-        candidate = f"https://{candidate}"
+        candidate = f"{default_scheme}://{candidate}"
 
     parsed = urlsplit(candidate)
     if not parsed.scheme or not parsed.netloc:
@@ -323,6 +352,13 @@ def _normalize_url(value: str, *, path_ok: bool = False) -> str:
 
     path = parsed.path.rstrip("/") if path_ok else parsed.path
     return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, ""))
+
+
+def _normalize_helper_url(value: str) -> str:
+    """Normalize an optional rendered-helper URL."""
+    if not value.strip():
+        return ""
+    return _normalize_url(value, path_ok=True, default_scheme="http")
 
 
 def _normalize_cookie_header(value: str) -> str:

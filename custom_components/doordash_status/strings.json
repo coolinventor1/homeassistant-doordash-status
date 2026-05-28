@@ -18,10 +18,11 @@
       },
       "browser_session": {
         "title": "Browser session cookie",
-        "description": "Paste the full request Cookie header from a logged-in DoorDash orders page request, ideally from https://www.doordash.com/orders/. This is unofficial and may stop working when DoorDash changes its site.",
+        "description": "Paste the full request Cookie header from a logged-in DoorDash orders page request, ideally from https://www.doordash.com/orders/. This is unofficial and may stop working when DoorDash changes its site. If you run the optional rendered helper, Home Assistant can also use it for richer detail-page fields like the dasher name.",
         "data": {
           "base_url": "DoorDash base URL",
-          "browser_cookie": "Browser Cookie header value"
+          "browser_cookie": "Browser Cookie header value",
+          "rendered_helper_url": "Rendered helper URL (optional)"
         }
       }
     },
@@ -38,7 +39,10 @@
       "init": {
         "title": "DoorDash Status options",
         "data": {
-          "scan_interval_minutes": "Refresh interval (minutes)"
+          "base_url": "DoorDash base URL",
+          "browser_cookie": "Browser Cookie header value",
+          "scan_interval_minutes": "Refresh interval (minutes)",
+          "rendered_helper_url": "Rendered helper URL (optional)"
         }
       }
     }

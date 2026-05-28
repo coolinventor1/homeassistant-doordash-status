@@ -9,6 +9,8 @@ It supports two connection modes:
 
 Because DoorDash does not provide a general public consumer API for this use case, this integration reads DoorDash order pages and extracts structured order data from the page payloads.
 
+Some richer fields on DoorDash's per-order page, especially the Dasher name, are rendered in the browser after JavaScript runs. For those fields, this repo now includes an optional local rendered helper that Home Assistant can call.
+
 ## What it exposes
 
 - `Active orders`
@@ -66,6 +68,40 @@ As long as the DoorDash session stays valid, Home Assistant should continue trac
 
 If DoorDash rotates your session later, open the integration `Options` in Home Assistant and paste a fresh browser cookie there. Leave the cookie field blank if you only want to change the scan interval and keep the current session.
 
+## Optional rendered helper
+
+If you want rendered-only fields like `Latest dasher` to work more reliably, run the local rendered helper on a Windows machine with Microsoft Edge installed.
+
+### Install the helper dependency
+
+```powershell
+pip install playwright
+```
+
+This helper launches your local Edge browser through Playwright. It does not install anything inside Home Assistant.
+
+### Start the helper
+
+From this repo:
+
+```powershell
+python .\scripts\doordash_rendered_helper.py --host 0.0.0.0 --port 8765
+```
+
+If you want the helper to have a default DoorDash session for local testing, keep `cookie.txt` in the repo root or pass `--cookie-file .\cookie.txt`.
+
+### Point Home Assistant at the helper
+
+1. Open `DoorDash Status` in Home Assistant.
+2. Click `Options`.
+3. Paste your usual DoorDash cookie if needed.
+4. Set `Rendered helper URL` to the machine running the helper, for example:
+   - `http://192.168.1.50:8765`
+   - or `http://192.168.1.50:8765/render-detail`
+5. Save and reload the integration.
+
+Home Assistant will then send the latest order detail URL plus your current DoorDash cookie to the helper, and the helper will return a parsed rendered-page result that gets merged back into the sensors.
+
 ## Local debugging
 
 You can debug the parser locally without reinstalling the Home Assistant integration on every change.
@@ -110,6 +146,18 @@ That flow:
 The script prints a compact summary plus the normalized order JSON using the same parser logic as the integration.
 
 Add `--print-json` if you want the full normalized JSON on stdout as well.
+
+Parse a saved rendered browser HTML file with the same detail parser:
+
+```powershell
+python .\scripts\doordash_rendered_helper.py --html "C:\path\to\saved_doordash_detail.html"
+```
+
+Render one live DoorDash order-detail page through Edge and print the parsed JSON:
+
+```powershell
+python .\scripts\doordash_rendered_helper.py --order-url "https://www.doordash.com/orders/<uuid>/?fromCheckout=true&userResumed=false&doubledash-redirect=false" --cookie-file .\cookie.txt
+```
 
 ## Notes
 

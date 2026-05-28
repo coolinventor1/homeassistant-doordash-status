@@ -9,7 +9,7 @@ import json
 import logging
 import re
 from typing import Any
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urlsplit
 
 try:
     import aiohttp
@@ -344,6 +344,7 @@ class DoorDashApiClient:
         *,
         base_url: str,
         cookie_header: str | None = None,
+        rendered_helper_url: str | None = None,
         tracking_url: str | None = None,
     ) -> None:
         """Store client dependencies."""
@@ -354,6 +355,7 @@ class DoorDashApiClient:
             )
         self._session = session
         self._base_url = base_url.rstrip("/")
+        self._rendered_helper_url = rendered_helper_url.strip() if rendered_helper_url else None
         self._tracking_url = tracking_url
         self._headers = {
             "Accept": "text/html,application/xhtml+xml,application/json",
@@ -423,6 +425,21 @@ class DoorDashApiClient:
         if detail_url is None:
             return orders
 
+        merged_candidates = list(orders)
+        if self._rendered_helper_url and self._headers.get("Cookie"):
+            try:
+                rendered_order = await self._async_get_rendered_detail(detail_url)
+            except DoorDashApiError as err:
+                _LOGGER.debug(
+                    "DoorDash rendered-helper enrichment failed for %s via %s: %s",
+                    detail_url,
+                    self._rendered_helper_url,
+                    err,
+                )
+            else:
+                if rendered_order is not None:
+                    merged_candidates.append(rendered_order)
+
         try:
             detail_html, detail_final_url = await self._async_get_text(detail_url)
         except DoorDashApiError as err:
@@ -431,14 +448,17 @@ class DoorDashApiClient:
                 detail_url,
                 err,
             )
+            detail_orders = []
+        else:
+            detail_orders = _extract_orders_from_html(detail_html, str(detail_final_url))
+
+        if not detail_orders and len(merged_candidates) == len(orders):
             return orders
 
-        detail_orders = _extract_orders_from_html(detail_html, str(detail_final_url))
-        if not detail_orders:
-            return orders
+        merged_candidates.extend(detail_orders)
 
         return sorted(
-            _merge_orders([*orders, *detail_orders]),
+            _merge_orders(merged_candidates),
             key=_order_sort_key,
             reverse=True,
         )
@@ -502,6 +522,58 @@ class DoorDashApiClient:
         finally:
             if response is not None:
                 response.release()
+
+    async def _async_get_rendered_detail(
+        self,
+        order_url: str,
+    ) -> dict[str, Any] | None:
+        """Ask an optional rendered helper to return a richer parsed order detail."""
+        if not self._rendered_helper_url:
+            return None
+
+        endpoint = _build_rendered_helper_endpoint(self._rendered_helper_url)
+        response: aiohttp.ClientResponse | None = None
+        try:
+            response = await self._session.post(
+                endpoint,
+                json={
+                    "order_url": order_url,
+                    "cookie_header": self._headers.get("Cookie"),
+                },
+                headers={"Accept": "application/json"},
+                timeout=self._timeout,
+                allow_redirects=True,
+            )
+            if response.status >= 400:
+                detail = await response.text()
+                raise DoorDashApiError(
+                    f"Rendered helper returned HTTP {response.status}: {detail[:200]}"
+                )
+
+            payload = await response.json(content_type=None)
+        except aiohttp.ClientError as err:
+            raise DoorDashConnectionError("Could not reach the rendered DoorDash helper.") from err
+        except TimeoutError as err:
+            raise DoorDashConnectionError("Rendered DoorDash helper request timed out.") from err
+        except (TypeError, ValueError, json.JSONDecodeError) as err:
+            raise DoorDashApiError("Rendered helper returned invalid JSON.") from err
+        finally:
+            if response is not None:
+                response.release()
+
+        if not isinstance(payload, dict):
+            raise DoorDashApiError("Rendered helper returned an unexpected payload.")
+
+        order = payload.get("order")
+        if order is None:
+            if payload.get("ok") is False:
+                raise DoorDashApiError(
+                    str(payload.get("error") or "Rendered helper could not parse the order page.")
+                )
+            return None
+        if not isinstance(order, dict):
+            raise DoorDashApiError("Rendered helper returned an invalid order object.")
+        return order
 
 
 class _ScriptCollector(HTMLParser):
@@ -1125,24 +1197,35 @@ def _parse_detail_page_items(
     index = start_index
     while index < end_index:
         chunk = chunks[index]
+        combined_match = re.fullmatch(r"(\d+)\s*[x×]\s+(.+)", chunk, re.IGNORECASE)
         quantity_match = re.fullmatch(r"(\d+)\s*[x×]", chunk, re.IGNORECASE)
-        if quantity_match is None:
+        if combined_match is None and quantity_match is None:
             index += 1
             continue
 
-        quantity = int(quantity_match.group(1))
-        if index + 2 >= end_index:
-            break
+        if combined_match is not None:
+            quantity = int(combined_match.group(1))
+            name = combined_match.group(2).strip()
+            if index + 1 >= end_index:
+                break
+            price_text = chunks[index + 1]
+            line_total_amount = _normalize_money_number(price_text)
+            description_parts: list[str] = []
+            index += 2
+        else:
+            quantity = int(quantity_match.group(1))
+            if index + 2 >= end_index:
+                break
 
-        name = chunks[index + 1]
-        price_text = chunks[index + 2]
-        line_total_amount = _normalize_money_number(price_text)
-        description_parts: list[str] = []
-        index += 3
+            name = chunks[index + 1]
+            price_text = chunks[index + 2]
+            line_total_amount = _normalize_money_number(price_text)
+            description_parts = []
+            index += 3
 
         while index < end_index:
             candidate = chunks[index]
-            if re.fullmatch(r"(\d+)\s*[x×]", candidate, re.IGNORECASE):
+            if re.fullmatch(r"(\d+)\s*[x×](?:\s+.+)?", candidate, re.IGNORECASE):
                 break
             if candidate in _DETAIL_RECEIPT_STOP_LABELS:
                 break
@@ -3336,6 +3419,19 @@ def _build_order_detail_url(order_id: Any, page_url: str) -> str | None:
         f"{base}/orders/{order_id.strip()}/"
         "?fromCheckout=true&userResumed=false&doubledash-redirect=false"
     )
+
+
+def _build_rendered_helper_endpoint(helper_url: str) -> str:
+    """Normalize a rendered-helper base URL into the concrete render endpoint."""
+    normalized = helper_url.strip().rstrip("/")
+    parsed = urlsplit(normalized)
+    if not parsed.scheme:
+        normalized = f"http://{normalized}"
+        parsed = urlsplit(normalized)
+
+    if parsed.path.endswith("/render-detail"):
+        return normalized
+    return f"{normalized}/render-detail"
 
 
 def _looks_like_money_string(value: str) -> bool:

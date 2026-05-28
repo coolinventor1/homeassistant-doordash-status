@@ -10,6 +10,7 @@ PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR]
 CONF_AUTH_MODE = "auth_mode"
 CONF_BASE_URL = "base_url"
 CONF_BROWSER_COOKIE = "browser_cookie"
+CONF_RENDERED_HELPER_URL = "rendered_helper_url"
 CONF_TRACKING_URL = "tracking_url"
 CONF_SCAN_INTERVAL_MINUTES = "scan_interval_minutes"
 
