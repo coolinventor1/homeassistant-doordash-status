@@ -38,10 +38,12 @@ async def async_setup_entry(
             if slot in added_slots:
                 continue
             added_slots.add(slot)
-            new_entities.append(DoorDashLatestOrderItemImage(coordinator, entry, index))
+            new_entities.append(
+                DoorDashLatestOrderItemImage(hass, coordinator, entry, index)
+            )
         return new_entities
 
-    entities: list[ImageEntity] = [DoorDashLatestOrderStoreImage(coordinator, entry)]
+    entities: list[ImageEntity] = [DoorDashLatestOrderStoreImage(hass, coordinator, entry)]
     entities.extend(_build_new_item_entities())
     async_add_entities(entities)
 
@@ -61,11 +63,13 @@ class DoorDashImageBase(CoordinatorEntity[DoorDashDataUpdateCoordinator], ImageE
 
     def __init__(
         self,
+        hass: HomeAssistant,
         coordinator: DoorDashDataUpdateCoordinator,
         entry: ConfigEntry,
     ) -> None:
         """Initialize the image entity."""
-        super().__init__(coordinator)
+        ImageEntity.__init__(self, hass)
+        CoordinatorEntity.__init__(self, coordinator)
         self._attr_device_info = _device_info(entry)
 
     @property
@@ -82,11 +86,12 @@ class DoorDashLatestOrderStoreImage(DoorDashImageBase):
 
     def __init__(
         self,
+        hass: HomeAssistant,
         coordinator: DoorDashDataUpdateCoordinator,
         entry: ConfigEntry,
     ) -> None:
         """Initialize the store image entity."""
-        super().__init__(coordinator, entry)
+        super().__init__(hass, coordinator, entry)
         self._attr_name = "Latest order store image"
         self._attr_unique_id = f"{entry.entry_id}_latest_order_store_image"
         self._attr_icon = "mdi:storefront-outline"
@@ -120,12 +125,13 @@ class DoorDashLatestOrderItemImage(DoorDashImageBase):
 
     def __init__(
         self,
+        hass: HomeAssistant,
         coordinator: DoorDashDataUpdateCoordinator,
         entry: ConfigEntry,
         index: int,
     ) -> None:
         """Initialize the item image entity."""
-        super().__init__(coordinator, entry)
+        super().__init__(hass, coordinator, entry)
         self._index = index
         slot = index + 1
         self._attr_name = f"Latest order item {slot} image"
