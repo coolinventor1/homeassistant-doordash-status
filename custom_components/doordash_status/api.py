@@ -1793,11 +1793,18 @@ def _extract_delivered_at(candidate: dict[str, Any]) -> datetime | None:
 
 def _extract_subtotal(candidate: dict[str, Any]) -> tuple[str | None, float | None]:
     """Extract the latest order subtotal when it is available."""
-    return _extract_money_component(
+    explicit = _extract_money_component(
         candidate,
         include_tokens=("subtotal",),
         exclude_tokens=("minimum subtotal", "min subtotal"),
     )
+    if explicit != (None, None):
+        return explicit
+
+    derived_amount = _derive_subtotal_from_candidate_items(candidate)
+    if derived_amount is None:
+        return None, None
+    return f"${derived_amount:.2f}", derived_amount
 
 
 def _extract_tip(candidate: dict[str, Any]) -> tuple[str | None, float | None]:
@@ -1988,29 +1995,9 @@ def _extract_items(candidate: dict[str, Any]) -> list[dict[str, Any]]:
         value = candidate.get(key)
         if not isinstance(value, list):
             continue
-
-        items: list[dict[str, Any]] = []
-        for item in value:
-            if not isinstance(item, dict):
-                continue
-            name = _first_value(
-                item,
-                "name",
-                "title",
-                "item_name",
-                "itemName",
-                "display_name",
-                "displayName",
-            )
-            if not isinstance(name, str) or not name.strip():
-                continue
-            quantity = item.get("quantity") or item.get("count") or 1
-            try:
-                quantity = int(quantity)
-            except (TypeError, ValueError):
-                quantity = 1
-            items.append({"name": name.strip(), "quantity": quantity})
-        return items
+        normalized = _normalize_item_list(value)
+        if normalized:
+            return normalized
 
     nested_items = _find_nested_items(candidate)
     if nested_items:
@@ -2178,7 +2165,31 @@ def _normalize_item_list(value: list[Any]) -> list[dict[str, Any]]:
         except (TypeError, ValueError):
             quantity = 1
 
-        items.append({"name": name.strip(), "quantity": quantity})
+        unit_price_amount = _extract_item_unit_price_amount(item)
+        line_total_amount = (
+            round(unit_price_amount * quantity, 2)
+            if isinstance(unit_price_amount, (int, float))
+            else None
+        )
+
+        items.append(
+            {
+                "name": name.strip(),
+                "quantity": quantity,
+                "unit_price_amount": unit_price_amount,
+                "unit_price_display": (
+                    f"${unit_price_amount:.2f}"
+                    if isinstance(unit_price_amount, (int, float))
+                    else None
+                ),
+                "line_total_amount": line_total_amount,
+                "line_total_display": (
+                    f"${line_total_amount:.2f}"
+                    if isinstance(line_total_amount, (int, float))
+                    else None
+                ),
+            }
+        )
 
     return items
 
@@ -2193,6 +2204,94 @@ def _count_items(items: list[dict[str, Any]]) -> int:
         except (TypeError, ValueError):
             total += 1
     return total
+
+
+def _derive_subtotal_from_candidate_items(candidate: dict[str, Any]) -> float | None:
+    """Derive a subtotal from item prices when DoorDash omits an explicit subtotal."""
+    items = _extract_items(candidate)
+    if not items:
+        return None
+
+    total = 0.0
+    found_price = False
+    for item in items:
+        line_total = item.get("line_total_amount") if isinstance(item, dict) else None
+        if isinstance(line_total, (int, float)):
+            total += float(line_total)
+            found_price = True
+
+    if not found_price:
+        return None
+    return round(total, 2)
+
+
+def _extract_item_unit_price_amount(item: dict[str, Any]) -> float | None:
+    """Extract a single item's unit price including any selected paid extras."""
+    base_amount = None
+    for key in (
+        "originalItemPrice",
+        "itemPrice",
+        "item_price",
+        "unitPrice",
+        "unit_price",
+        "price",
+    ):
+        if key not in item:
+            continue
+        base_amount = _normalize_money_number(item.get(key))
+        if base_amount is not None:
+            break
+
+    if base_amount is None:
+        nested = _find_nested_value(
+            item,
+            "originalItemPrice",
+            "itemPrice",
+            "item_price",
+            "unitPrice",
+            "unit_price",
+            "price",
+        )
+        base_amount = _normalize_money_number(nested)
+
+    extras_amount = _extract_item_extras_total(item)
+    if base_amount is None and extras_amount is None:
+        return None
+
+    total = float(base_amount or 0.0) + float(extras_amount or 0.0)
+    return round(total, 2)
+
+
+def _extract_item_extras_total(item: dict[str, Any]) -> float | None:
+    """Extract the additional price contributed by item extras."""
+    extras = item.get("orderItemExtras")
+    if not isinstance(extras, list):
+        return None
+
+    total = 0.0
+    found_amount = False
+    for extra in extras:
+        if not isinstance(extra, dict):
+            continue
+        options = extra.get("orderItemExtraOptions")
+        if not isinstance(options, list):
+            continue
+        for option in options:
+            if not isinstance(option, dict):
+                continue
+            amount = _normalize_money_number(option.get("price"))
+            if amount is None:
+                continue
+            try:
+                quantity = int(option.get("quantity") or 1)
+            except (TypeError, ValueError):
+                quantity = 1
+            total += amount * quantity
+            found_amount = True
+
+    if not found_amount:
+        return None
+    return round(total, 2)
 
 
 def _find_best_money_value(candidate: dict[str, Any]) -> tuple[str | None, float | None] | None:
