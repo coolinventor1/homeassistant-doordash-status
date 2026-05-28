@@ -646,10 +646,19 @@ def _extract_order_summaries_from_text(html: str, page_url: str) -> list[dict[st
                 "store_name": store_name,
                 "eta_at": None,
                 "eta_text": None,
+                "delivered_at": None,
                 "updated_at": created_at,
                 "created_at": created_at,
                 "total_display": meta["total_display"],
                 "total_amount": meta["total_amount"],
+                "subtotal_display": None,
+                "subtotal_amount": None,
+                "tip_display": None,
+                "tip_amount": None,
+                "tax_display": None,
+                "tax_amount": None,
+                "fees_display": None,
+                "fees_amount": None,
                 "fulfillment_type": meta["fulfillment_type"],
                 "tracking_url": None,
                 "help_url": None,
@@ -967,6 +976,7 @@ def _merge_order_into(target: dict[str, Any], incoming: dict[str, Any]) -> None:
         "store_name",
         "eta_at",
         "eta_text",
+        "delivered_at",
         "dasher_name",
         "raw_status",
     ):
@@ -990,6 +1000,19 @@ def _merge_order_into(target: dict[str, Any], incoming: dict[str, Any]) -> None:
         target["total_display"] = incoming["total_display"]
     if target.get("total_amount") is None and incoming.get("total_amount") is not None:
         target["total_amount"] = incoming["total_amount"]
+    for component in ("subtotal", "tip", "tax", "fees"):
+        display_key = f"{component}_display"
+        amount_key = f"{component}_amount"
+        if (
+            incoming.get(display_key) is not None
+            and (
+                target.get(display_key) is None
+                or _display_needs_cleanup(target.get(display_key))
+            )
+        ):
+            target[display_key] = incoming[display_key]
+        if target.get(amount_key) is None and incoming.get(amount_key) is not None:
+            target[amount_key] = incoming[amount_key]
 
     if _should_replace_items(target, incoming):
         target["items"] = incoming["items"]
@@ -1199,6 +1222,7 @@ def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict
     raw_status = _normalize_status(_stringify(_extract_status(candidate)))
     store_name = _extract_store_name(candidate)
     eta_at, eta_text = _extract_eta(candidate)
+    delivered_at = _extract_delivered_at(candidate)
     updated_at = _parse_any_datetime(
         _first_value(
             candidate,
@@ -1223,6 +1247,14 @@ def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict
     )
     total_display, total_amount = _extract_total(candidate)
     total_display = _normalize_total_display(total_display, total_amount)
+    subtotal_display, subtotal_amount = _extract_subtotal(candidate)
+    subtotal_display = _normalize_total_display(subtotal_display, subtotal_amount)
+    tip_display, tip_amount = _extract_tip(candidate)
+    tip_display = _normalize_total_display(tip_display, tip_amount)
+    tax_display, tax_amount = _extract_tax(candidate)
+    tax_display = _normalize_total_display(tax_display, tax_amount)
+    fees_display, fees_amount = _extract_fees(candidate)
+    fees_display = _normalize_total_display(fees_display, fees_amount)
     fulfillment_type = _stringify(
         _first_value(candidate, "fulfillment_type", "fulfillmentType", "delivery_type")
     )
@@ -1294,10 +1326,19 @@ def _normalize_order_candidate(candidate: dict[str, Any], page_url: str) -> dict
         "store_name": store_name,
         "eta_at": eta_at,
         "eta_text": eta_text,
+        "delivered_at": delivered_at,
         "updated_at": updated_at,
         "created_at": created_at,
         "total_display": total_display,
         "total_amount": total_amount,
+        "subtotal_display": subtotal_display,
+        "subtotal_amount": subtotal_amount,
+        "tip_display": tip_display,
+        "tip_amount": tip_amount,
+        "tax_display": tax_display,
+        "tax_amount": tax_amount,
+        "fees_display": fees_display,
+        "fees_amount": fees_amount,
         "fulfillment_type": fulfillment_type,
         "tracking_url": tracking_url,
         "help_url": help_url,
@@ -1712,6 +1753,189 @@ def _extract_total(candidate: dict[str, Any]) -> tuple[str | None, float | None]
     if fallback is not None:
         return fallback
     return None, None
+
+
+def _extract_delivered_at(candidate: dict[str, Any]) -> datetime | None:
+    """Extract a delivered/completed timestamp when DoorDash exposes one."""
+    direct = _parse_any_datetime(
+        _first_value(
+            candidate,
+            "delivered_at",
+            "deliveredAt",
+            "completed_at",
+            "completedAt",
+            "fulfilled_at",
+            "fulfilledAt",
+            "actual_delivery_time",
+            "actualDeliveryTime",
+            "dropoff_completed_at",
+            "dropoffCompletedAt",
+        )
+    )
+    if direct is not None:
+        return direct
+
+    nested = _find_nested_value(
+        candidate,
+        "delivered_at",
+        "deliveredAt",
+        "completed_at",
+        "completedAt",
+        "fulfilled_at",
+        "fulfilledAt",
+        "actual_delivery_time",
+        "actualDeliveryTime",
+        "dropoff_completed_at",
+        "dropoffCompletedAt",
+    )
+    return _parse_any_datetime(nested)
+
+
+def _extract_subtotal(candidate: dict[str, Any]) -> tuple[str | None, float | None]:
+    """Extract the latest order subtotal when it is available."""
+    return _extract_money_component(
+        candidate,
+        include_tokens=("subtotal",),
+        exclude_tokens=("minimum subtotal", "min subtotal"),
+    )
+
+
+def _extract_tip(candidate: dict[str, Any]) -> tuple[str | None, float | None]:
+    """Extract the latest order tip when it is available."""
+    return _extract_money_component(
+        candidate,
+        include_tokens=("tip",),
+        exclude_tokens=("before tip", "default tip", "tip amount label"),
+    )
+
+
+def _extract_tax(candidate: dict[str, Any]) -> tuple[str | None, float | None]:
+    """Extract the latest order tax when it is available."""
+    return _extract_money_component(
+        candidate,
+        include_tokens=("tax",),
+        exclude_tokens=("tax exempt",),
+    )
+
+
+def _extract_fees(candidate: dict[str, Any]) -> tuple[str | None, float | None]:
+    """Extract the latest order fees when they are available."""
+    fees = _collect_money_component_candidates(
+        candidate,
+        include_tokens=("fee",),
+        exclude_tokens=("tax", "tip", "monthly", "save", "saving", "discount"),
+    )
+    if not fees:
+        return None, None
+
+    total_amount = 0.0
+    found_amount = False
+    for fee in fees:
+        amount = fee.get("amount")
+        if not isinstance(amount, (int, float)):
+            continue
+        total_amount += float(amount)
+        found_amount = True
+
+    if not found_amount:
+        best = fees[0]
+        return best.get("display"), best.get("amount")
+
+    return f"${total_amount:.2f}", round(total_amount, 2)
+
+
+def _extract_money_component(
+    candidate: dict[str, Any],
+    *,
+    include_tokens: tuple[str, ...],
+    exclude_tokens: tuple[str, ...] = (),
+) -> tuple[str | None, float | None]:
+    """Extract a single receipt-style money component from a nested order payload."""
+    matches = _collect_money_component_candidates(
+        candidate,
+        include_tokens=include_tokens,
+        exclude_tokens=exclude_tokens,
+    )
+    if not matches:
+        return None, None
+
+    best = matches[0]
+    return best.get("display"), best.get("amount")
+
+
+def _collect_money_component_candidates(
+    candidate: dict[str, Any],
+    *,
+    include_tokens: tuple[str, ...],
+    exclude_tokens: tuple[str, ...] = (),
+) -> list[dict[str, Any]]:
+    """Collect nested money entries that match a set of receipt-style tokens."""
+    collected: list[dict[str, Any]] = []
+    queue: list[Any] = [candidate]
+    seen_nodes: set[int] = set()
+    seen_values: set[str] = set()
+
+    while queue:
+        current = queue.pop(0)
+        current_id = id(current)
+        if current_id in seen_nodes:
+            continue
+        seen_nodes.add(current_id)
+
+        if isinstance(current, dict):
+            for key, value in current.items():
+                if isinstance(value, (dict, list)):
+                    queue.append(value)
+
+                normalized = _normalize_money(value)
+                if normalized == (None, None):
+                    continue
+
+                key_label = key.lower()
+                label = _extract_money_label(value)
+                haystack = " ".join(part for part in (key_label, label) if part)
+                if not haystack:
+                    continue
+                if any(token in haystack for token in exclude_tokens):
+                    continue
+                if not any(token in haystack for token in include_tokens):
+                    continue
+
+                display, amount = normalized
+                score = 0
+                if label and any(token in label for token in include_tokens):
+                    score += 4
+                if any(token in key_label for token in include_tokens):
+                    score += 3
+                if label:
+                    score += 1
+
+                candidate_info = {
+                    "key": key,
+                    "label": label or None,
+                    "display": _normalize_total_display(display, amount),
+                    "amount": amount,
+                    "score": score,
+                }
+                marker = json.dumps(candidate_info, sort_keys=True, default=str)
+                if marker in seen_values:
+                    continue
+                seen_values.add(marker)
+                collected.append(candidate_info)
+            continue
+
+        if isinstance(current, list):
+            queue.extend(item for item in current if isinstance(item, (dict, list)))
+
+    collected.sort(
+        key=lambda item: (
+            item.get("score", 0),
+            item.get("amount") is not None,
+            item.get("display") is not None,
+        ),
+        reverse=True,
+    )
+    return collected
 
 
 def _extract_dasher_name(candidate: dict[str, Any]) -> str | None:
