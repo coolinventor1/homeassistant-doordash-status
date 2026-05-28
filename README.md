@@ -94,6 +94,19 @@ Parse a saved DoorDash orders HTML file:
 python .\scripts\doordash_local_debug.py --html .\orders_snapshot.html
 ```
 
+Fetch the latest order's richer detail page automatically from a live DoorDash session:
+
+```powershell
+python .\scripts\doordash_local_debug.py --latest-detail --save-orders-html .\orders_snapshot.html --save-html .\latest_order_detail.html
+```
+
+That flow:
+
+- fetches `https://www.doordash.com/orders/`
+- extracts the latest order's `order_detail_url`
+- fetches the richer `/orders/<uuid>/...` page
+- saves both the history page and the specific order page locally for debugging
+
 The script prints a compact summary plus the normalized order JSON using the same parser logic as the integration.
 
 Add `--print-json` if you want the full normalized JSON on stdout as well.

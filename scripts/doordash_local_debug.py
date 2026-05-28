@@ -69,9 +69,25 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         help="Optional DoorDash tracking URL to fetch instead of the orders history page.",
     )
     parser.add_argument(
+        "--latest-detail",
+        action="store_true",
+        help=(
+            "Fetch the main orders page first, resolve the latest order detail URL, "
+            "then fetch and parse that richer per-order page."
+        ),
+    )
+    parser.add_argument(
         "--save-html",
         type=Path,
         help="Optional path to save the fetched HTML for repeatable local parsing.",
+    )
+    parser.add_argument(
+        "--save-orders-html",
+        type=Path,
+        help=(
+            "Optional path to save the fetched main /orders page HTML when using "
+            "--latest-detail."
+        ),
     )
     parser.add_argument(
         "--json-out",
@@ -183,6 +199,30 @@ def _load_parser_module(repo_root: Path) -> Any:
     return module
 
 
+def _resolve_latest_detail_url(
+    parser_module: Any,
+    *,
+    orders_html: str,
+    orders_url: str,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Parse the main orders page and return the latest resolvable detail URL."""
+    orders = parser_module.extract_orders_from_html(orders_html, orders_url)
+    detail_url = next(
+        (
+            order.get("order_detail_url")
+            for order in orders
+            if isinstance(order.get("order_detail_url"), str)
+            and order["order_detail_url"].strip()
+        ),
+        None,
+    )
+    if detail_url is None:
+        raise SystemExit(
+            "Could not find an order_detail_url on the fetched DoorDash /orders page."
+        )
+    return detail_url, orders
+
+
 def _print_summary(orders: list[dict[str, Any]], *, source_url: str, limit: int) -> None:
     """Print a compact terminal summary of parsed orders."""
     print(f"Parsed {len(orders)} orders from {source_url}")
@@ -227,11 +267,49 @@ def main() -> int:
                 "A live DoorDash fetch requires a cookie via --cookie, --cookie-file, "
                 "a DOORDASH_COOKIE environment variable, or a repo-level cookie.txt file."
             )
-        html, source_url = _fetch_html(
-            cookie_header=cookie_header,
-            base_url=args.base_url,
-            tracking_url=args.tracking_url,
-        )
+        if args.latest_detail:
+            if args.tracking_url:
+                raise SystemExit("--latest-detail cannot be combined with --tracking-url.")
+
+            orders_html, orders_url = _fetch_html(
+                cookie_header=cookie_header,
+                base_url=args.base_url,
+                tracking_url=None,
+            )
+            if args.save_orders_html is not None:
+                args.save_orders_html.parent.mkdir(parents=True, exist_ok=True)
+                args.save_orders_html.write_text(orders_html, encoding="utf-8")
+
+            detail_url, orders = _resolve_latest_detail_url(
+                parser_module,
+                orders_html=orders_html,
+                orders_url=orders_url,
+            )
+            print(
+                "Resolved latest detail URL from orders page:",
+                detail_url,
+            )
+            if orders:
+                latest = orders[0]
+                print(
+                    "Latest order from /orders:",
+                    latest.get("store_name") or "Unknown store",
+                    latest.get("total_display") or latest.get("total_amount") or "",
+                )
+                print()
+
+            html, source_url = _fetch_html(
+                cookie_header=cookie_header,
+                base_url=args.base_url,
+                tracking_url=detail_url,
+            )
+        else:
+            html, source_url = _fetch_html(
+                cookie_header=cookie_header,
+                base_url=args.base_url,
+                tracking_url=args.tracking_url,
+            )
+
         if args.save_html is not None:
             args.save_html.parent.mkdir(parents=True, exist_ok=True)
             args.save_html.write_text(html, encoding="utf-8")
