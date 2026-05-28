@@ -892,7 +892,12 @@ def _extract_order_detail_from_text(
         "fulfillment_type": fulfillment_type,
         "tracking_url": None,
         "help_url": None,
-        "dasher_name": _parse_detail_dasher_name(chunks, item_count_index),
+        "dasher_name": _parse_detail_dasher_name(
+            html,
+            chunks,
+            item_count_index,
+            store_name,
+        ),
         "items": items,
         "item_count": _parse_header_item_count(chunks[item_count_index]) or _count_items(items),
         "confidence": 11,
@@ -1020,33 +1025,84 @@ def _parse_detail_milestone(chunks: list[str]) -> tuple[str | None, str | None]:
     return chunks[milestone_index], message
 
 
-def _parse_detail_dasher_name(chunks: list[str], item_count_index: int) -> str | None:
+def _parse_detail_dasher_name(
+    html: str,
+    chunks: list[str],
+    item_count_index: int,
+    store_name: str | None,
+) -> str | None:
     """Parse the Dasher name when it is explicitly visible on the detail page."""
     try:
         dasher_index = chunks.index("Your Dasher")
     except ValueError:
-        return None
+        dasher_index = None
 
-    candidate_index = dasher_index + 1
-    if candidate_index >= len(chunks):
-        return None
-
-    candidate = chunks[candidate_index]
-    if candidate_index + 2 < len(chunks):
-        store_candidate = chunks[candidate_index + 1]
-        item_count_candidate = chunks[candidate_index + 2]
-        if (
-            _looks_like_store_name(store_candidate)
-            and re.fullmatch(r"\d+\s+items?", item_count_candidate, re.IGNORECASE)
-        ):
-            if candidate != store_candidate:
+    if dasher_index is not None:
+        search_end = min(len(chunks), item_count_index + 1, dasher_index + 6)
+        for candidate in chunks[dasher_index + 1 : search_end]:
+            if candidate == store_name or candidate == "Your Dasher":
+                continue
+            if _looks_like_person_name(candidate):
                 return candidate
 
-    if candidate_index + 1 == item_count_index:
-        return None
-    if _looks_like_store_name(candidate):
-        return None
-    return candidate
+    if item_count_index >= 2:
+        candidate = chunks[item_count_index - 2]
+        if candidate != store_name and _looks_like_person_name(candidate):
+            return candidate
+
+    if isinstance(store_name, str) and store_name.strip():
+        html_candidate = _extract_detail_dasher_name_from_html(html, store_name.strip())
+        if html_candidate is not None:
+            return html_candidate
+
+    return None
+
+
+def _extract_detail_dasher_name_from_html(html: str, store_name: str) -> str | None:
+    """Extract a Dasher name directly from detail-page HTML near the store section."""
+    label_pattern = re.compile(
+        r"Your\s+Dasher.*?<span[^>]*>(?P<name>[A-Z][A-Za-z'’.-]+(?:\s+[A-Z][A-Za-z'’.-]+){0,2})</span>",
+        re.DOTALL,
+    )
+    match = label_pattern.search(html)
+    if match is not None:
+        candidate = match.group("name").strip()
+        if _looks_like_person_name(candidate):
+            return candidate
+
+    before_store_pattern = re.compile(
+        rf"<span[^>]*>(?P<name>[A-Z][A-Za-z'’.-]+(?:\s+[A-Z][A-Za-z'’.-]+){{0,2}})</span>"
+        rf".{{0,1200}}?{re.escape(store_name)}"
+        rf".{{0,300}}?\d+\s+Items",
+        re.DOTALL,
+    )
+    matches = list(before_store_pattern.finditer(html))
+    for match in reversed(matches):
+        candidate = match.group("name").strip()
+        if _looks_like_person_name(candidate) and candidate != store_name:
+            return candidate
+
+    return None
+
+
+def _looks_like_person_name(text: str | None) -> bool:
+    """Return whether a text chunk looks like a person's name."""
+    if text is None:
+        return False
+
+    cleaned = text.strip()
+    if not cleaned or cleaned in {"Your Dasher", "Help", "Rate store"}:
+        return False
+    if _looks_like_store_name(cleaned) and re.search(r"\b(Bread|Grill|Kitchen|Cafe|Watch|Panera|Chipotle)\b", cleaned):
+        return False
+    if _looks_like_money_string(cleaned):
+        return False
+    if re.search(r"\d", cleaned):
+        return False
+    return (
+        re.fullmatch(r"[A-Z][A-Za-z'’.-]+(?:\s+[A-Z][A-Za-z'’.-]+){0,2}", cleaned)
+        is not None
+    )
 
 
 def _parse_header_item_count(text: str | None) -> int | None:
