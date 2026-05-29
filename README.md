@@ -106,31 +106,6 @@ Home Assistant will then send the latest order detail URL plus your current Door
 
 You can debug the parser locally without reinstalling the Home Assistant integration on every change.
 
-## Standalone Python client
-
-This repo also includes a standalone Python client you can use outside Home Assistant:
-
-- library: [C:\Users\Owner\OneDrive\Documents\homeassistant-doordash-status\doordash_client.py](</C:/Users/Owner/OneDrive/Documents/homeassistant-doordash-status/doordash_client.py>)
-- quickstart script: [C:\Users\Owner\OneDrive\Documents\homeassistant-doordash-status\scripts\doordash_quickstart.py](</C:/Users/Owner/OneDrive/Documents/homeassistant-doordash-status/scripts/doordash_quickstart.py>)
-
-The quickstart script is meant to be edited directly. Paste your DoorDash browser `Cookie` request header into `COOKIE_HEADER` at the top of the file, then run:
-
-```powershell
-python .\scripts\doordash_quickstart.py
-```
-
-The script prints a short summary of the latest order and saves the full normalized JSON to `latest_order_standalone.json`.
-
-If you want to import it from your own script instead:
-
-```python
-from doordash_client import DoorDashClient
-
-client = DoorDashClient(cookie_header="paste your DoorDash Cookie header here")
-latest_order = client.fetch_latest_order(include_detail=True)
-print(latest_order["store_name"])
-```
-
 Live fetch the current DoorDash orders page:
 
 ```powershell
