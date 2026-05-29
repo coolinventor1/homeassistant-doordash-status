@@ -45,7 +45,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         with suppress(asyncio.CancelledError):
             await coordinator.async_refresh()
 
-    initial_refresh_task = hass.async_create_task(
+    # Use a plain asyncio task so Home Assistant startup does not wait on
+    # DoorDash's first background refresh.
+    initial_refresh_task = asyncio.create_task(
         _async_initial_refresh(),
         name=f"{DOMAIN}_{entry.entry_id}_initial_refresh",
     )

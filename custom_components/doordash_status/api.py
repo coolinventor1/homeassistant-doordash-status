@@ -693,9 +693,16 @@ def _extract_orders_from_html(html: str, page_url: str) -> list[dict[str, Any]]:
     collector = _ScriptCollector()
     collector.feed(html)
 
+    payloads = _extract_json_payloads(collector.scripts)
+    targeted_payloads = _extract_orders_query_payloads(payloads)
+
     candidates: list[dict[str, Any]] = []
-    for payload in _extract_json_payloads(collector.scripts):
-        candidates.extend(_find_orders(payload, page_url))
+    if targeted_payloads:
+        for payload in targeted_payloads:
+            candidates.extend(_find_orders(payload, page_url))
+    else:
+        for payload in payloads:
+            candidates.extend(_find_orders(payload, page_url))
     candidates.extend(_extract_order_summaries_from_text(html, page_url))
     if detail_candidate is not None:
         candidates.append(detail_candidate)
@@ -759,6 +766,64 @@ def _extract_json_payloads(scripts: Iterable[dict[str, Any]]) -> list[Any]:
             continue
         _LOGGER.debug("DoorDash Next.js chunk %s did not yield structured values", chunk_id)
     return payloads
+
+
+def _extract_orders_query_payloads(payloads: Iterable[Any]) -> list[Any]:
+    """Return the most relevant payloads for DoorDash orders history pages."""
+    targeted: list[Any] = []
+
+    for payload in payloads:
+        direct_orders = _extract_orders_query_data(payload)
+        if direct_orders is not None:
+            targeted.append(direct_orders)
+
+    return targeted
+
+
+def _extract_orders_query_data(payload: Any) -> Any | None:
+    """Extract the getConsumerOrdersWithDetails data list from a payload."""
+    if not isinstance(payload, dict):
+        return None
+
+    direct_orders = payload.get("getConsumerOrdersWithDetails")
+    if isinstance(direct_orders, list):
+        return direct_orders
+
+    if _payload_query_name(payload) != "getConsumerOrdersWithDetails":
+        return None
+
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return None
+
+    direct_orders = data.get("getConsumerOrdersWithDetails")
+    if isinstance(direct_orders, list):
+        return direct_orders
+
+    return None
+
+
+def _payload_query_name(payload: dict[str, Any]) -> str | None:
+    """Extract the GraphQL query name from an Apollo cache payload."""
+    query = payload.get("query")
+    if not isinstance(query, dict):
+        return None
+
+    definitions = query.get("definitions")
+    if not isinstance(definitions, list):
+        return None
+
+    for definition in definitions:
+        if not isinstance(definition, dict):
+            continue
+        name = definition.get("name")
+        if not isinstance(name, dict):
+            continue
+        value = name.get("value")
+        if isinstance(value, str) and value.strip():
+            return value
+
+    return None
 
 
 def _parse_next_push_chunk(content: str) -> tuple[str, str] | None:
