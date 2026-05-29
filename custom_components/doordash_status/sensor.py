@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import ceil
+import re
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
@@ -68,7 +69,9 @@ def _serialize_order(order: dict[str, Any] | None) -> dict[str, Any] | None:
         "tracking_url": order.get("tracking_url"),
         "help_url": order.get("help_url"),
         "dasher_name": order.get("dasher_name"),
+        "delivery_address": order.get("delivery_address"),
         "delivery_instructions": order.get("delivery_instructions"),
+        "payment_method": order.get("payment_method"),
         "has_dropoff_photo": bool(order.get("dropoff_photo_url")),
         "item_count": order.get("item_count"),
         "source_order_id": order.get("source_order_id"),
@@ -121,6 +124,26 @@ def _uuid_value(order: dict[str, Any] | None) -> str | None:
         return None
     source_order_id = order.get("source_order_id")
     return source_order_id if isinstance(source_order_id, str) and source_order_id.strip() else None
+
+
+def _string_field(order: dict[str, Any] | None, key: str) -> str | None:
+    """Return a clean string field from the latest order."""
+    if order is None:
+        return None
+    value = order.get(key)
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _card_last4_value(order: dict[str, Any] | None) -> str | None:
+    """Return the last 4 digits of the saved payment method when available."""
+    payment_method = _string_field(order, "payment_method")
+    if payment_method is None:
+        return None
+
+    match = re.search(r"(\d{4})(?!.*\d)", payment_method)
+    if match is None:
+        return None
+    return match.group(1)
 
 
 def _item_count_value(order: dict[str, Any] | None) -> int:
@@ -388,6 +411,61 @@ SENSOR_DESCRIPTIONS: tuple[DoorDashSensorDescription, ...] = (
         icon="mdi:shopping-outline",
         value_fn=lambda data: data.latest_order.get("fulfillment_type") if data.latest_order else None,
         attrs_fn=lambda data: {
+            "latest_order": _serialize_order(data.latest_order),
+        },
+    ),
+    DoorDashSensorDescription(
+        key="latest_order_address",
+        name="Latest order address",
+        icon="mdi:map-marker-outline",
+        value_fn=lambda data: _string_field(data.latest_order, "delivery_address"),
+        attrs_fn=lambda data: {
+            "delivery_address_lines": (
+                data.latest_order.get("delivery_address_lines")
+                if data.latest_order
+                else None
+            ),
+            "delivery_instructions": (
+                data.latest_order.get("delivery_instructions")
+                if data.latest_order
+                else None
+            ),
+            "latest_order": _serialize_order(data.latest_order),
+        },
+    ),
+    DoorDashSensorDescription(
+        key="latest_order_left_at",
+        name="Latest order left at",
+        icon="mdi:door-open",
+        value_fn=lambda data: _string_field(data.latest_order, "delivery_instructions"),
+        attrs_fn=lambda data: {
+            "delivery_address": (
+                data.latest_order.get("delivery_address")
+                if data.latest_order
+                else None
+            ),
+            "has_dropoff_photo": bool(
+                data.latest_order and data.latest_order.get("dropoff_photo_url")
+            ),
+            "latest_order": _serialize_order(data.latest_order),
+        },
+    ),
+    DoorDashSensorDescription(
+        key="latest_order_card_last_4",
+        name="Latest order card last 4",
+        icon="mdi:credit-card-outline",
+        value_fn=lambda data: _card_last4_value(data.latest_order),
+        attrs_fn=lambda data: {
+            "payment_method": (
+                data.latest_order.get("payment_method")
+                if data.latest_order
+                else None
+            ),
+            "payment_time": _serialize_datetime(
+                data.latest_order.get("payment_time")
+            )
+            if data.latest_order
+            else None,
             "latest_order": _serialize_order(data.latest_order),
         },
     ),
