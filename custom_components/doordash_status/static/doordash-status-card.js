@@ -221,6 +221,7 @@ class DoorDashLatestOrderCard extends HTMLElement {
         cursor: pointer;
         border-radius: 24px;
         overflow: hidden;
+        container-type: inline-size;
       }
 
       .wrapper {
@@ -235,15 +236,16 @@ class DoorDashLatestOrderCard extends HTMLElement {
       }
 
       .header-row {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: start;
         gap: 14px;
       }
 
       .brand-wrap {
         min-width: 0;
-        display: flex;
+        display: grid;
+        grid-template-columns: 56px minmax(0, 1fr);
         align-items: center;
         gap: 14px;
       }
@@ -290,11 +292,12 @@ class DoorDashLatestOrderCard extends HTMLElement {
         font-size: 1.32rem;
         line-height: 1.15;
         font-weight: 500;
-        overflow-wrap: anywhere;
+        overflow-wrap: break-word;
+        word-break: normal;
       }
 
       .total-pill {
-        flex: 0 0 auto;
+        justify-self: end;
         padding: 9px 12px;
         border-radius: 999px;
         background: #111;
@@ -334,6 +337,47 @@ class DoorDashLatestOrderCard extends HTMLElement {
         color: #111;
         font-size: 0.78rem;
         font-weight: 600;
+      }
+
+      @container (max-width: 360px) {
+        .wrapper {
+          padding: 16px;
+          gap: 16px;
+        }
+
+        .header-row {
+          grid-template-columns: minmax(0, 1fr);
+          gap: 12px;
+        }
+
+        .brand-wrap {
+          grid-template-columns: 48px minmax(0, 1fr);
+          gap: 12px;
+        }
+
+        .brand-image,
+        .brand-fallback {
+          width: 48px;
+          height: 48px;
+          border-radius: 16px;
+        }
+
+        .store-name {
+          font-size: 1.16rem;
+          line-height: 1.12;
+        }
+
+        .total-pill {
+          justify-self: start;
+          margin-left: 60px;
+        }
+
+        .thumb,
+        .thumb-placeholder {
+          width: 48px;
+          height: 48px;
+          border-radius: 15px;
+        }
       }
     `;
   }

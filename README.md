@@ -41,7 +41,7 @@ Use your actual `Latest order summary` entity id from Home Assistant if it diffe
 If Home Assistant still says `Custom element doesn't exist: doordash-latest-order-card`, add this Lovelace resource once and hard refresh the browser:
 
 ```yaml
-url: /doordash_status_static/doordash-status-card.js?v=0.1.32
+url: /doordash_status_static/doordash-status-card.js?v=0.1.33
 type: module
 ```
 
