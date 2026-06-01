@@ -197,6 +197,32 @@ def _serialize_items(order: dict[str, Any] | None) -> list[dict[str, Any]]:
     return serialized
 
 
+def _serialize_item_previews(
+    order: dict[str, Any] | None,
+    *,
+    limit: int = 6,
+) -> list[dict[str, Any]]:
+    """Return lightweight item preview data for a custom dashboard card."""
+    previews: list[dict[str, Any]] = []
+    for item in _items(order):
+        if not isinstance(item, dict):
+            continue
+        image_url = item.get("image_url")
+        name = item.get("name")
+        if not isinstance(image_url, str) or not image_url.strip():
+            continue
+        previews.append(
+            {
+                "name": name.strip() if isinstance(name, str) and name.strip() else None,
+                "image_url": image_url.strip(),
+                "quantity": item.get("quantity"),
+            }
+        )
+        if len(previews) >= limit:
+            break
+    return previews
+
+
 def _format_item_label(item: dict[str, Any], *, include_quantity: bool = True) -> str | None:
     """Return a compact human-readable label for a single order item."""
     name = item.get("name") if isinstance(item, dict) else None
@@ -346,6 +372,26 @@ SENSOR_DESCRIPTIONS: tuple[DoorDashSensorDescription, ...] = (
         icon="mdi:storefront-outline",
         value_fn=lambda data: data.latest_order.get("store_name") if data.latest_order else None,
         attrs_fn=lambda data: {
+            "latest_order": _serialize_order(data.latest_order),
+        },
+    ),
+    DoorDashSensorDescription(
+        key="latest_order_summary",
+        name="Latest order summary",
+        icon="mdi:credit-card-outline",
+        value_fn=lambda data: data.latest_order.get("store_name") if data.latest_order else None,
+        attrs_fn=lambda data: {
+            "store_name": data.latest_order.get("store_name") if data.latest_order else None,
+            "store_image_url": data.latest_order.get("store_image_url") if data.latest_order else None,
+            "total_display": data.latest_order.get("total_display") if data.latest_order else None,
+            "status": data.latest_order.get("status") if data.latest_order else None,
+            "raw_status": data.latest_order.get("raw_status") if data.latest_order else None,
+            "item_count": _item_count_value(data.latest_order),
+            "items_preview": _serialize_item_previews(data.latest_order),
+            "order_detail_url": data.latest_order.get("order_detail_url") if data.latest_order else None,
+            "tracking_url": data.latest_order.get("tracking_url") if data.latest_order else None,
+            "updated_at": _serialize_datetime(data.latest_order.get("updated_at")) if data.latest_order else None,
+            "created_at": _serialize_datetime(data.latest_order.get("created_at")) if data.latest_order else None,
             "latest_order": _serialize_order(data.latest_order),
         },
     ),

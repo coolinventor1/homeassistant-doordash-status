@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from pathlib import Path
 
+from homeassistant.components import frontend
+from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -16,13 +19,41 @@ from .const import (
     CONF_RENDERED_HELPER_URL,
     CONF_TRACKING_URL,
     DOMAIN,
+    FRONTEND_CARD_URL,
+    FRONTEND_STATIC_PATH,
     PLATFORMS,
 )
 from .coordinator import DoorDashDataUpdateCoordinator
 
+DATA_ENTRY_IDS = "__entry_ids__"
+DATA_FRONTEND_REGISTERED = "__frontend_registered__"
+DATA_STATIC_REGISTERED = "__static_registered__"
+
+
+async def async_setup(hass: HomeAssistant, config: dict) -> bool:
+    """Set up shared static resources for DoorDash Status."""
+    domain_data = hass.data.setdefault(DOMAIN, {})
+
+    if not domain_data.get(DATA_STATIC_REGISTERED):
+        static_dir = Path(__file__).parent / "static"
+        await hass.http.async_register_static_paths(
+            [StaticPathConfig(FRONTEND_STATIC_PATH, str(static_dir), True)]
+        )
+        domain_data[DATA_STATIC_REGISTERED] = True
+
+    return True
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up DoorDash Status from a config entry."""
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    entry_ids: set[str] = domain_data.setdefault(DATA_ENTRY_IDS, set())
+    entry_ids.add(entry.entry_id)
+
+    if not domain_data.get(DATA_FRONTEND_REGISTERED):
+        frontend.add_extra_js_url(hass, FRONTEND_CARD_URL)
+        domain_data[DATA_FRONTEND_REGISTERED] = True
+
     options = entry.options
     client = DoorDashApiClient(
         session=async_get_clientsession(hass),
@@ -36,7 +67,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     coordinator = DoorDashDataUpdateCoordinator(hass, entry, client)
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+    domain_data[entry.entry_id] = coordinator
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
@@ -59,9 +90,18 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        hass.data[DOMAIN].pop(entry.entry_id, None)
-        if not hass.data[DOMAIN]:
-            hass.data.pop(DOMAIN)
+        domain_data = hass.data.get(DOMAIN, {})
+        domain_data.pop(entry.entry_id, None)
+
+        entry_ids = domain_data.get(DATA_ENTRY_IDS)
+        if isinstance(entry_ids, set):
+            entry_ids.discard(entry.entry_id)
+            if not entry_ids and domain_data.get(DATA_FRONTEND_REGISTERED):
+                frontend.remove_extra_js_url(hass, FRONTEND_CARD_URL)
+                domain_data[DATA_FRONTEND_REGISTERED] = False
+
+        if not domain_data:
+            hass.data.pop(DOMAIN, None)
     return unload_ok
 
 

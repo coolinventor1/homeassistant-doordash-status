@@ -24,6 +24,29 @@ Some richer fields on DoorDash's per-order page, especially the Dasher name, are
 
 Sensor attributes can include item lists, tracking URLs, help URLs, fulfillment type, ETA text, recent order summaries, and order totals when DoorDash includes them.
 
+## Dashboard card
+
+This integration now includes an auto-loaded Lovelace card for the latest order.
+
+After updating and restarting Home Assistant, add a manual card with:
+
+```yaml
+type: custom:doordash-latest-order-card
+entity: sensor.latest_order_summary
+title: Latest order
+```
+
+Use your actual `Latest order summary` entity id from Home Assistant if it differs.
+
+The card shows:
+
+- store logo
+- store name
+- order total
+- item thumbnails for the latest order
+
+Tapping the card opens more-info for the configured summary sensor.
+
 ## Installation
 
 ### HACS custom repository
