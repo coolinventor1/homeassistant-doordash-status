@@ -6,9 +6,10 @@ from homeassistant.const import Platform
 
 DOMAIN = "doordash_status"
 PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.IMAGE]
+VERSION = "0.1.32"
 FRONTEND_STATIC_PATH = f"/{DOMAIN}_static"
 FRONTEND_CARD_FILENAME = "doordash-status-card.js"
-FRONTEND_CARD_URL = f"{FRONTEND_STATIC_PATH}/{FRONTEND_CARD_FILENAME}"
+FRONTEND_CARD_URL = f"{FRONTEND_STATIC_PATH}/{FRONTEND_CARD_FILENAME}?v={VERSION}"
 
 CONF_AUTH_MODE = "auth_mode"
 CONF_BASE_URL = "base_url"
